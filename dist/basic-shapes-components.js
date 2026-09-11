@@ -38,8 +38,6 @@
             var blur = props.shadowBlur || 0;
             var shadow = blur > 0 ? "0 2px " + blur + "px " + (props.shadowColor || "rgba(0,0,0,0.2)") : "none";
 
-            el.style.width = "100%";
-            el.style.height = "100%";
             el.style.backgroundColor = props.fill || "transparent";
             el.style.border = sw > 0 ? sw + "px " + (props.strokeStyle || "solid") + " " + (props.stroke || "#4a6fa5") : "none";
             el.style.borderRadius = br + "px";
@@ -83,8 +81,6 @@
             var blur = props.shadowBlur || 0;
             var shadow = blur > 0 ? "0 2px " + blur + "px " + (props.shadowColor || "rgba(0,0,0,0.2)") : "none";
 
-            el.style.width = "100%";
-            el.style.height = "100%";
             el.style.backgroundColor = props.fill || "transparent";
             el.style.border = sw > 0 ? sw + "px " + (props.strokeStyle || "solid") + " " + (props.stroke || "#4a6fa5") : "none";
             el.style.borderRadius = "50%";
