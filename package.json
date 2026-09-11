@@ -1,0 +1,25 @@
+{
+  "name": "@kufayeka/nexa-component-basic-shapes",
+  "version": "0.1.0",
+  "description": "Example Nexa Dashboard component plugins (Rectangle, Text Label) — proves the framework-agnostic NEXA.registerComponent contract with one plain-DOM component and one Lit-based Web Component.",
+  "main": "widgets/basic-shapes-plugin.js",
+  "scripts": {
+    "build": "esbuild widgets/src/text-label-element.js --bundle --format=iife --outfile=dist/text-label-element.bundle.js"
+  },
+  "node-red": {
+    "version": ">=4.0.0",
+    "plugins": {
+      "kufayeka-nexa-component-basic-shapes": "widgets/basic-shapes-plugin.js"
+    }
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.0",
+    "lit": "^3.3.3"
+  },
+  "keywords": [
+    "node-red",
+    "node-red-plugin",
+    "kufayeka",
+    "nexa"
+  ]
+}
