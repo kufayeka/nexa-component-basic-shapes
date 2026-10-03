@@ -75,25 +75,31 @@ withHarness({
         assert.deepStrictEqual(r, ['url(#arr-end)', null, '6,6']);
     });
 
-    await ok('automatic inspector: sections from `group`, enums as choices, visibleWhen, edits', async () => {
+    await ok('inspector: tree groups from `group`, enums as choices, visibleWhen, edits', async () => {
         const r = await js(`(async function () {
             var ins = NexaTest.inspector("kufayeka-rect", {});
             await NexaTest.wait();
-            var headings = Array.from(ins.box.querySelectorAll(".nx-section-head .nx-title")).map(function (t) { return t.textContent; });
-            var styleSel = Array.from(ins.box.querySelectorAll("nx-select, nx-segmented")).map(function (e) { return e.localName + ":" + e.label; });
-            var shadowColorBefore = !!Array.from(ins.box.querySelectorAll("nx-color")).find(function (e) { return e.label === "Shadow colour"; });
-            var blur = Array.from(ins.box.querySelectorAll("nx-number")).find(function (e) { return e.label === "Shadow blur"; }).querySelector("input");
+            // the property tree: groups are its top rows; a prop's widget is in the pane once picked
+            var groupsOf = function (box) { return NexaTest.rows(box).filter(function (x) { return /^@[^/]+$/.test(x.id); }).map(function (x) { return x.label; }); };
+            var shown = function (label) { return NexaTest.rows(ins.box).some(function (x) { return x.label === label; }); };
+            var headings = groupsOf(ins.box);
+            var strokeStyle = await ins.field("strokeStyle");
+            var styleSel = [strokeStyle.localName + ":" + strokeStyle.label];
+            var shadowColorBefore = shown("Shadow colour");
+            var blur = (await ins.field("shadowBlur")).querySelector("input");
             blur.value = "6"; blur.dispatchEvent(new Event("change"));
             await NexaTest.wait();
-            var shadowColorAfter = !!Array.from(ins.box.querySelectorAll("nx-color")).find(function (e) { return e.label === "Shadow colour"; });
-            var dashed = Array.from(ins.box.querySelectorAll("nx-segmented .nx-seg-item")).find(function (b) { return b.textContent.trim() === "Dashed"; });
+            var shadowColorAfter = shown("Shadow colour");
+            strokeStyle = await ins.field("strokeStyle");
+            var dashed = Array.from(strokeStyle.querySelectorAll(".nx-seg-item")).find(function (b) { return b.textContent.trim() === "Dashed"; });
             dashed.click(); await NexaTest.wait();
             var out = { headings: headings, styleSel: styleSel, before: shadowColorBefore, after: shadowColorAfter, props: { shadowBlur: ins.props.shadowBlur, strokeStyle: ins.props.strokeStyle } };
             ins.destroy();
             var t = NexaTest.inspector("kufayeka-text-label", {});
             await NexaTest.wait();
-            out.textHeadings = Array.from(t.box.querySelectorAll(".nx-section-head .nx-title")).map(function (x) { return x.textContent; });
-            out.weight = (Array.from(t.box.querySelectorAll("nx-select")).find(function (e) { return e.label === "Weight"; }) || {}).localName;
+            out.textHeadings = groupsOf(t.box);
+            var wRow = NexaTest.rows(t.box).filter(function (x) { return x.label === "Weight"; })[0];
+            out.weight = wRow ? (await t.field(wRow.id)).localName : null;
             t.destroy();
             return out;
         })()`);
