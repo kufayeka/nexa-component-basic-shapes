@@ -4,7 +4,8 @@
   "description": "Nexa Dashboard \"Basic\" components (Rectangle, Circle / Ellipse, Triangle, Diamond, Star, Line, Freeform Path, Text Label) on the Nexa component SDK, with the automatic property panel.",
   "main": "widgets/basic-shapes-plugin.js",
   "scripts": {
-    "test": "node test/browser.test.js"
+    "test": "npm run lint && node test/browser.test.js",
+    "lint": "node -e \"process.exit(require('@kufayeka/node-red-nexa-dashboard/sdk/lint-plugin').cli('.'))\""
   },
   "node-red": {
     "version": ">=4.0.0",
