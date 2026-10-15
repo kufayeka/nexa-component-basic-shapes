@@ -1,6 +1,7 @@
 {
   "name": "@kufayeka/nexa-component-basic-shapes",
   "version": "0.1.0",
+  "license": "SEE LICENSE IN LICENSE",
   "description": "Nexa Dashboard \"Basic\" components (Rectangle, Circle / Ellipse, Triangle, Diamond, Star, Line, Freeform Path, Text Label) on the Nexa component SDK, with the automatic property panel.",
   "main": "widgets/basic-shapes-plugin.js",
   "scripts": {
