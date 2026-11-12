@@ -91,7 +91,7 @@ withHarness({
             await NexaTest.wait();
             var shadowColorAfter = shown("Shadow colour");
             strokeStyle = await ins.field("strokeStyle");
-            var dashed = Array.from(strokeStyle.querySelectorAll(".nx-seg-item")).find(function (b) { return b.textContent.trim() === "Dashed"; });
+            var dashed = Array.from(strokeStyle.querySelectorAll(".knx-seg-item")).find(function (b) { return b.textContent.trim() === "Dashed"; });
             dashed.click(); await NexaTest.wait();
             var out = { headings: headings, styleSel: styleSel, before: shadowColorBefore, after: shadowColorAfter, props: { shadowBlur: ins.props.shadowBlur, strokeStyle: ins.props.strokeStyle } };
             ins.destroy();
@@ -104,11 +104,11 @@ withHarness({
             return out;
         })()`);
         assert.deepStrictEqual(r.headings, ['Shape', 'Effects']);
-        assert.ok(r.styleSel.indexOf('nx-segmented:Stroke style') !== -1, JSON.stringify(r.styleSel));
+        assert.ok(r.styleSel.indexOf('knx-segmented:Stroke style') !== -1, JSON.stringify(r.styleSel));
         assert.deepStrictEqual([r.before, r.after], [false, true], 'shadow colour appears once there is a blur');
         assert.deepStrictEqual(r.props, { shadowBlur: 6, strokeStyle: 'dashed' });
         assert.deepStrictEqual(r.textHeadings, ['Text', 'Box']);
-        assert.strictEqual(r.weight, 'nx-select');
+        assert.strictEqual(r.weight, 'knx-select');
     });
 
     await ok('no JavaScript errors in the page', async () => {
