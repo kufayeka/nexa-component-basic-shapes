@@ -347,7 +347,7 @@ function valveView(p, pts, i, D) {
     const angle = Math.atan2(u.y, u.x) * 180 / Math.PI;
     const open = valveOpening(q) > 0;
     const state = open ? (p.valveOpenColor || "#2e9e4f") : (p.valveClosedColor || "#d0342c");
-    const base = p.pipeColor || "#8a99ad";
+    const base = textureBase(p, stretchTextures(pts, p.look === "pipe" ? p.texture : "flat")[Math.min(i, pts.length - 2)]);
     const wall = shade(base, -0.45), shell = shade(base, -0.12);
     const inside = open ? (p.liquid ? (p.liquidColor || "#2f8fff") : shade(base, 0.45)) : shade(base, -0.3);
     const k = D / 16;
@@ -393,6 +393,80 @@ function valveView(p, pts, i, D) {
         <line x1="0" y1="0" x2="0" y2="${s * 30}" stroke="${wall}" stroke-width="2.5"></line>
         <path data-valve-state d="M-22 ${s * 30} A22 16 0 0 ${s < 0 ? 1 : 0} 22 ${s * 30} Z" fill="${state}" stroke="${wall}" stroke-width="1.5"></path>`;
     return svg`<g data-valve="${i}" data-style="${style}" data-open="${open ? "yes" : "no"}" transform="translate(${q.x} ${q.y}) rotate(${angle}) scale(${k})">${body}</g>`;
+}
+
+// ---- pipe textures ----------------------------------------------------------------------------------------------------------------
+// A texture is how the pipe's metal (or plastic, or glass) looks across its width. It is drawn as stacked strokes along the path, from
+// the edge (the full width, darkest) to the centre (narrow, brightest): strokes follow every bend, curve and elbow by themselves, so the
+// shading turns with the pipe without one gradient per segment. Each point may change it from that point on (point.texture), like its
+// diameter: steel into PVC, say. Flat and glass let the liquid show; the others are solid (Particles over solid pipes decides the flow).
+
+const PIPE_TEXTURES = [{ value: "flat", label: "Flat (the pipe colour)" }, { value: "steel", label: "Steel" }, { value: "chrome", label: "Chrome (polished)" },
+    { value: "stainless", label: "Stainless (brushed)" }, { value: "copper", label: "Copper" }, { value: "pvc", label: "PVC" },
+    { value: "painted", label: "Painted (paint colour)" }, { value: "insulated", label: "Insulated (cladding)" }, { value: "glass", label: "Glass (see-through)" }];
+// each solid texture: its base colour, and how much darker (< 0) or lighter (> 0) each stroke is, from the edge to the centre
+const TEXTURE_RAMPS = {
+    steel: { base: "#9a9a9a", ks: [-0.62, -0.45, -0.28, -0.1, 0.1, 0.3, 0.55, 0.8] },
+    chrome: { base: "#9d9d9d", ks: [-0.8, -0.3, 0.6, 0.1, -0.35, 0.3, 0.85, 0.95] },
+    stainless: { base: "#aeb8c2", ks: [-0.55, -0.38, -0.2, -0.05, 0.1, 0.25, 0.45, 0.6] },
+    copper: { base: "#b45e30", ks: [-0.6, -0.4, -0.2, 0, 0.15, 0.3, 0.45, 0.55] },
+    pvc: { base: "#a3a9af", ks: [-0.45, -0.25, -0.1, 0, 0.08, 0.15, 0.2, 0.22] },
+    painted: { base: "", ks: [-0.6, -0.4, -0.2, 0, 0.15, 0.3, 0.45, 0.55] },
+    insulated: { base: "#c9ccd0", ks: [-0.5, -0.3, -0.15, 0, 0.15, 0.3, 0.5, 0.7] }
+};
+function textureOf(v) { return PIPE_TEXTURES.some((t) => t.value === v) ? v : "flat"; }
+/** Whether a texture hides what runs inside (everything but flat and glass). */
+function isSolidTexture(tex) { return tex !== "flat" && tex !== "glass"; }
+/** The colour a texture's fittings, cones and valve bodies are made of. */
+function textureBase(p, tex) {
+    if (tex === "flat") return p.pipeColor || "#8a99ad";
+    if (tex === "glass") return "#9fb3c4";
+    if (tex === "painted") return plainValue(p.paintColor) || "#2f7fd1";
+    return TEXTURE_RAMPS[tex].base;
+}
+/** The texture of each stretch: the line's, or the last point before it that sets its own (point.texture). */
+function stretchTextures(pts, lineTexture) {
+    const out = [];
+    let current = textureOf(lineTexture);
+    for (let i = 0; i < pts.length - 1; i++) {
+        if (pts[i].texture) current = textureOf(pts[i].texture);
+        out.push(current);
+    }
+    return out;
+}
+/**
+ * Every solid-textured part of a pipe (tubes and fitting shells), drawn LAYER BY LAYER per texture: first the edge stroke of every part,
+ * then the next shade of every part, and so on to the centre. A junction (a tee, a cross, an elbow fitting) is then one piece of metal:
+ * drawn part by part instead, each branch's full shading would paint over the highlight of the branch before it, and the joint would look
+ * like three pipes stacked on each other. Shells come before tubes in each layer, so a fitting's body shows around the pipes in it.
+ */
+function texturedLayers(p, shells, tubes) {
+    const out = [];
+    const textures = [];
+    shells.concat(tubes).forEach((t) => { if (textures.indexOf(t.tex) === -1) textures.push(t.tex); });
+    textures.forEach((tex) => {
+        const ramp = TEXTURE_RAMPS[tex];
+        const base = textureBase(p, tex);
+        const last = ramp.ks.length - 1;
+        const parts = shells.filter((t) => t.tex === tex).concat(tubes.filter((t) => t.tex === tex));
+        const layers = ramp.ks.map((k, j) => svg`<g data-texture-layer="${j}">${parts.map((t) => svg`<path d="${t.d}" fill="none" stroke="${k === 0 ? base : shade(base, k)}"
+            stroke-width="${t.w * (1 - (j / last) * 0.88)}" stroke-linejoin="round" stroke-linecap="${t.cap ? "round" : "butt"}"></path>`)}</g>`);
+        // the cladding joints start half a gap in (not on a junction, where every branch begins)
+        const cladding = tex === "insulated" ? tubes.filter((t) => t.tex === tex).map((t) => svg`<path data-cladding d="${t.d}" fill="none" stroke="rgba(0,0,0,0.28)"
+            stroke-width="${t.w}" stroke-dasharray="${"2," + Math.round(t.w * 2.6)}" stroke-dashoffset="${-Math.round(t.w * 1.3)}" stroke-linejoin="round" stroke-linecap="butt"></path>`) : nothing;
+        out.push(svg`<g data-texture="${tex}">${layers}${cladding}</g>`);
+    });
+    return out;
+}
+
+/**
+ * The glass parts of a pipe, layer by layer like the solid ones (a glass tee is one piece too): every wall, then every inside tint,
+ * then every shine. Drawn half-transparent over the liquid, so what runs inside shows.
+ */
+function glassLayers(parts) {
+    if (!parts.length) return nothing;
+    const each = (color, k) => parts.map((t) => svg`<path d="${t.d}" fill="none" stroke="${color}" stroke-width="${t.w * k}" stroke-linejoin="round" stroke-linecap="${t.cap ? "round" : "butt"}"></path>`);
+    return svg`<g data-texture="glass" opacity="0.55">${each("rgba(90,110,130,0.85)", 1)}${each("rgba(235,244,250,0.92)", 0.84)}${each("rgba(255,255,255,0.6)", 0.14)}</g>`;
 }
 
 /** What a point asks for: its own fitting ("auto" when it says nothing). */
@@ -446,18 +520,20 @@ function pipeRadius(p, D) {
  * with where they are along the line (for the particles) -> { tubes, shells, cones, over, veils, kinds, zones: [{ at, reach }] }.
  */
 function pipePlan(p, pts, D) {
-    const base = p.pipeColor || "#8a99ad";
-    const wall = shade(base, -0.45), shell = shade(base, -0.12);
+    const textures = stretchTextures(pts, p.texture);
+    // the texture at point i (the stretch after it; the last point: the one before it), and its fitting colours
+    const texAt = (i) => textures[Math.max(0, Math.min(textures.length - 1, i))];
+    const metal = (tex) => { const b = textureBase(p, tex); return { base: b, wall: shade(b, -0.45), shell: shade(b, -0.12), tex }; };
     const on = p.fittings !== false;
     const radius = pipeRadius(p, D);
     const widths = stretchWidths(pts, D);
     const level = p.liquid ? Math.max(0, Math.min(1, p.liquidLevel === undefined || p.liquidLevel === "" ? 1 : Number(p.liquidLevel))) : 0;
     const plan = { tubes: [], shells: [], cones: [], over: [], veils: [], kinds: [], zones: [] };
-    const band = (q, u, w, flanged) => plan.over.push(svg`<polygon data-band points="${bandPts(q, u, w, flanged ? 4 : 0, flanged ? 5 : 1.6)}" fill="${flanged ? shell : wall}" stroke="${flanged ? wall : "none"}"></polygon>`);
-    const cone = (from, to, wa, wb, st) => {
+    const band = (q, u, w, flanged, m) => plan.over.push(svg`<polygon data-band points="${bandPts(q, u, w, flanged ? 4 : 0, flanged ? 5 : 1.6)}" fill="${flanged ? m.shell : m.wall}" stroke="${flanged ? m.wall : "none"}"></polygon>`);
+    const cone = (from, to, wa, wb, st, m) => {
         const off = st === "eccentric" ? (wa - wb) / 2 : 0;
-        plan.cones.push({ wall: taper(from, to, wa, wb, off), body: taper(from, to, wa * 0.8, wb * 0.8, off), liq: taper(from, to, wa * 0.6 * level, wb * 0.6 * level, off) });
-        if (st === "flanged") { band(from, unitOf(from, to), wa, true); band(to, unitOf(from, to), wb, true); }
+        plan.cones.push({ m, wall: taper(from, to, wa, wb, off), body: taper(from, to, wa * 0.8, wb * 0.8, off), liq: taper(from, to, wa * 0.6 * level, wb * 0.6 * level, off) });
+        if (st === "flanged") { band(from, unitOf(from, to), wa, true, m); band(to, unitOf(from, to), wb, true, m); }
     };
     const n = pts.length;
     // where each run starts and ends short: cuts[i] = how far the tube stays away from point i (into a junction, a reducer)
@@ -472,17 +548,17 @@ function pipePlan(p, pts, D) {
         if (f && f.k === "into") { keep(Math.min(Number(f.trim) || 0, room)); plan.zones.push({ at: q, reach: Number(f.trim) || 0 }); return; }
         if (on && own === "cap") {
             const t = w * 0.45;
-            plan.shells.push({ d: seg(along(q, u, w * 0.4), along(q, u, -t * 0.6)), w: w * 1.18, cap: true });
-            band(along(q, u, w * 0.4), u, w * 1.18, false);
+            plan.shells.push({ d: seg(along(q, u, w * 0.4), along(q, u, -t * 0.6)), w: w * 1.18, cap: true, m: metal(texAt(i)) });
+            band(along(q, u, w * 0.4), u, w * 1.18, false, metal(texAt(i)));
             plan.kinds.push("cap");
             plan.zones.push({ at: q, reach: w * 0.4 });
             return;
         }
         if (f && f.k === "joint" && on && own !== "none") {
             const st = pointStyle(p, q, "reducer"), W = Math.max(w, Number(f.d) || w);
-            if (st === "step") { band(q, u, W, true); plan.kinds.push("reducer"); return; }
+            if (st === "step") { band(q, u, W, true, metal(texAt(i))); plan.kinds.push("reducer"); return; }
             const L = Math.min(pointLength(p, q, "reducer") * W, room), s = along(q, u, L);
-            cone(q, s, W, w, st);
+            cone(q, s, W, w, st, metal(texAt(i)));
             keep(L);
             plan.kinds.push("reducer");
             plan.zones.push({ at: q, reach: L });
@@ -499,22 +575,22 @@ function pipePlan(p, pts, D) {
         const wideFirst = a > b, W = Math.max(a, b), w = Math.min(a, b);
         // the cone goes into the narrower stretch
         const to = pts[wideFirst ? i + 1 : i - 1], u = unitOf(q, to);
-        if (st === "step") { band(q, u, W, true); plan.kinds.push("reducer"); continue; }
+        if (st === "step") { band(q, u, W, true, metal(texAt(i))); plan.kinds.push("reducer"); continue; }
         const L = Math.min(pointLength(p, q, "reducer") * W, Math.hypot(to.x - q.x, to.y - q.y) * 0.9);
-        cone(q, along(q, u, L), W, w, st);
+        cone(q, along(q, u, L), W, w, st, metal(texAt(wideFirst ? i - 1 : i)));
         if (wideFirst) cutStart[i] = L; else cutEnd[i] = L;
         plan.kinds.push("reducer");
         plan.zones.push({ at: q, reach: L });
     }
 
-    // ---- the tubes: runs of one width
+    // ---- the tubes: runs of one width and one texture
     let s0 = 0;
     for (let i = 1; i <= n - 1; i++) {
-        if (i < n - 1 && Math.abs(widths[i] - widths[i - 1]) < 0.5) continue;
+        if (i < n - 1 && Math.abs(widths[i] - widths[i - 1]) < 0.5 && textures[i] === textures[i - 1]) continue;
         const run = pts.slice(s0, i + 1).map((q) => ({ x: q.x, y: q.y }));
         if (cutStart[s0]) run[0] = along(run[0], unitOf(run[0], run[1]), cutStart[s0]);
         if (cutEnd[i]) run[run.length - 1] = along(run[run.length - 1], unitOf(run[run.length - 1], run[run.length - 2]), cutEnd[i]);
-        plan.tubes.push({ d: linePath(run, p.routing, Math.min(radius, widths[s0] * 1.8)), w: widths[s0] });
+        plan.tubes.push({ d: linePath(run, p.routing, Math.min(radius, widths[s0] * 1.8)), w: widths[s0], tex: textures[s0] });
         s0 = i;
     }
 
@@ -528,9 +604,9 @@ function pipePlan(p, pts, D) {
             const w = q ? widthAt(b.i) : D;
             const L = Math.min(pointLength(p, q, "elbow") * w, b.l1 / 2, b.l2 / 2), r = Math.min(radius, L);
             const e1 = along(b.k, b.u1, -L), e2 = along(b.k, b.u2, L), p1 = along(b.k, b.u1, -r), p2 = along(b.k, b.u2, r);
-            plan.shells.push({ d: seg(e1, p1) + " Q" + b.k.x.toFixed(1) + " " + b.k.y.toFixed(1) + " " + p2.x.toFixed(1) + " " + p2.y.toFixed(1) + " L" + e2.x.toFixed(1) + " " + e2.y.toFixed(1), w: w * 1.26 });
-            band(e1, b.u1, w * 1.26, st === "flanged");
-            band(e2, b.u2, w * 1.26, st === "flanged");
+            plan.shells.push({ d: seg(e1, p1) + " Q" + b.k.x.toFixed(1) + " " + b.k.y.toFixed(1) + " " + p2.x.toFixed(1) + " " + p2.y.toFixed(1) + " L" + e2.x.toFixed(1) + " " + e2.y.toFixed(1), w: w * 1.26, m: metal(texAt(b.i >= 0 ? b.i - 1 : 0)) });
+            band(e1, b.u1, w * 1.26, st === "flanged", metal(texAt(b.i >= 0 ? b.i - 1 : 0)));
+            band(e2, b.u2, w * 1.26, st === "flanged", metal(texAt(b.i >= 0 ? b.i : 0)));
             plan.kinds.push("elbow");
             plan.zones.push({ at: b.k, reach: L });
         });
@@ -543,7 +619,7 @@ function pipePlan(p, pts, D) {
         const auto = f && (f.k === "tee" || f.k === "cross");
         if (own === "flange" && on) {
             const u = unitOf(i > 0 ? pts[i - 1] : q, i > 0 ? q : pts[1]);
-            band(q, u, widthAt(i), true);
+            band(q, u, widthAt(i), true, metal(texAt(i)));
             plan.kinds.push("flange");
             return;
         }
@@ -556,14 +632,26 @@ function pipePlan(p, pts, D) {
         ((auto && f.dirs) || []).forEach((u) => branches.push({ u: { x: u.x, y: u.y }, w: Number(u.w) || W }));
         branches.forEach((b) => {
             const end = along(q, b.u, L);
-            plan.tubes.push({ d: seg(q, end), w: b.w });
-            if (st === "fitting" || st === "flanged") { plan.shells.push({ d: seg(q, end), w: W * 1.28 }); band(end, b.u, W * 1.28, st === "flanged"); }
+            plan.tubes.push({ d: seg(q, end), w: b.w, tex: texAt(i) });
+            if (st === "fitting" || st === "flanged") { plan.shells.push({ d: seg(q, end), w: W * 1.28, m: metal(texAt(i)) }); band(end, b.u, W * 1.28, st === "flanged", metal(texAt(i))); }
         });
         if (st === "saddle") {
             const run = branches[0] ? branches[0].u : { x: 1, y: 0 }, ang = Math.atan2(run.y, run.x) * 180 / Math.PI;
+            const sm = metal(texAt(i)), shell = sm.shell, wall = sm.wall;
             const ell = (op) => svg`<ellipse cx="${q.x}" cy="${q.y}" rx="${W * 1.25}" ry="${W * 0.78}" transform="rotate(${ang} ${q.x} ${q.y})" fill="${shell}" fill-opacity="${op}" stroke="${wall}" stroke-width="1.5"></ellipse>`;
-            plan.shells.push({ ellipse: ell(1) });
-            plan.veils.push((veil) => ell(veil));
+            if (isSolidTexture(sm.tex)) {
+                // a solid texture: the saddle shaded like the pipe, as ellipses stacked from its dark rim to its bright middle
+                // drawn OVER the pipe (a saddle clamps around it, the branch comes out of it), so no veil is needed
+                const ramp = TEXTURE_RAMPS[sm.tex], last = ramp.ks.length - 1;
+                plan.over.push(svg`<g data-saddle transform="rotate(${ang} ${q.x} ${q.y})">${ramp.ks.map((k, j) => {
+                    const f = 1 - (j / last) * 0.85;
+                    return svg`<ellipse cx="${q.x}" cy="${q.y}" rx="${W * 1.25 * f}" ry="${W * 0.78 * f}" fill="${k === 0 ? sm.base : shade(sm.base, k)}"
+                        stroke="${j === 0 ? wall : "none"}" stroke-width="1.5"></ellipse>`;
+                })}</g>`);
+            } else {
+                plan.shells.push({ ellipse: ell(1) });
+                plan.veils.push((veil) => ell(veil));
+            }
         }
         plan.kinds.push(auto ? f.k : own);
         if (st !== "seamless") plan.zones.push({ at: q, reach: L });
@@ -585,21 +673,30 @@ function pipeView(p, pts, D, dashes, marchStyle, dashLen, showCenter) {
     const on = p.fittings !== false;
     const veil = on ? 1 - Math.max(0, Math.min(1, pnum(p, "flowInside"))) : 0;
     const plan = pipePlan(p, pts, D);
-    const tubes = plan.tubes, shells = plan.shells, cones = plan.cones;
+    // flat parts are drawn layer by layer as before (one liquid through every junction); textured parts as their stacked strokes
+    const tubes = plan.tubes.filter((t) => t.tex === "flat"), shells = plan.shells.filter((sh) => !sh.m || sh.m.tex === "flat");
+    const texTubes = plan.tubes.filter((t) => t.tex !== "flat" && t.d), texShells = plan.shells.filter((sh) => sh.m && sh.m.tex !== "flat" && sh.d);
+    const seeThrough = plan.tubes.filter((t) => !isSolidTexture(t.tex));
+    const cones = plan.cones;
+    const texOfPart = (t) => t.tex || t.m.tex;
+    const solidParts = (list) => list.filter((t) => isSolidTexture(texOfPart(t))).map((t) => ({ d: t.d, w: t.w, cap: t.cap, tex: texOfPart(t) }));
+    const glassParts = (list) => list.filter((t) => texOfPart(t) === "glass").map((t) => ({ d: t.d, w: t.w, cap: t.cap }));
     const layer = (list, k, color, extra) => list.filter((t) => t.d).map((t) => svg`<path d="${t.d}" fill="none" stroke="${color}" stroke-width="${t.w * k}" stroke-linejoin="round" stroke-linecap="butt" opacity="${extra === undefined ? 1 : extra}"></path>`);
     const shellLayer = (k, color, op) => shells.filter((s) => s.d).map((s) => svg`<path d="${s.d}" fill="none" stroke="${color}" stroke-width="${s.w * k}" stroke-linejoin="round" stroke-linecap="${s.cap ? "round" : "butt"}" opacity="${op === undefined ? 1 : op}"></path>`);
     return svg`<g data-pipe data-fittings="${plan.kinds.join(" ")}">
         ${shells.map((s) => s.ellipse || nothing)}
         ${shellLayer(1, wall)}
         ${layer(tubes, 1, wall)}
-        ${cones.map((c) => svg`<polygon points="${c.wall}" fill="${wall}"></polygon>`)}
+        ${cones.map((c) => svg`<polygon points="${c.wall}" fill="${c.m.wall}"></polygon>`)}
         ${shellLayer(0.84, shell)}
         ${layer(tubes, 0.8, base)}
-        ${cones.map((c) => svg`<polygon points="${c.body}" fill="${shell}"></polygon>`)}
-        ${level > 0 ? svg`<g data-liquid opacity="0.92">${layer(tubes, 0.6 * level, p.liquidColor || "#2f8fff")}${cones.map((c) => svg`<polygon points="${c.liq}" fill="${p.liquidColor || "#2f8fff"}"></polygon>`)}</g>` : nothing}
+        ${texturedLayers(p, solidParts(texShells), solidParts(texTubes))}
+        ${cones.map((c) => svg`<polygon points="${c.body}" fill="${c.m.shell}"></polygon>`)}
+        ${level > 0 ? svg`<g data-liquid opacity="0.92">${layer(seeThrough, 0.6 * level, p.liquidColor || "#2f8fff")}${cones.filter((c) => !isSolidTexture(c.m.tex)).map((c) => svg`<polygon points="${c.liq}" fill="${p.liquidColor || "#2f8fff"}"></polygon>`)}</g>` : nothing}
+        ${glassLayers(glassParts(texShells).concat(glassParts(texTubes)))}
         ${layer(tubes, 0.18, light, 0.8)}
         ${showCenter ? layer(tubes, 0.06, "#ffffff", 0.5) : nothing}
-        ${veil > 0 ? svg`<g data-veil>${shellLayer(0.84, shell, veil)}${cones.map((c) => svg`<polygon points="${c.body}" fill="${shell}" opacity="${veil}"></polygon>`)}${plan.veils.map((v) => v(veil))}</g>` : nothing}
+        ${veil > 0 ? svg`<g data-veil>${shellLayer(0.84, shell, veil)}${cones.map((c) => svg`<polygon points="${c.body}" fill="${c.m.shell}" opacity="${veil}"></polygon>`)}${plan.veils.map((v) => v(veil))}</g>` : nothing}
         ${plan.over}
         ${dashes ? svg`<path class="dashes" style="${marchStyle}" d="${linePath(pts, p.routing, pipeRadius(p, D))}" fill="none" stroke="${shade(base, 0.7)}" stroke-width="${Math.max(2, D * 0.22)}" stroke-dasharray="${dashLen},${dashLen}" stroke-linecap="round"></path>` : nothing}
     </g>`;
@@ -644,6 +741,9 @@ export const flowLine = defineComponent({
                         help: "Bind it to the valve's position. 0: closed, and the particles of the whole line stand still where they are. Above 0: they move (at the speed set on the points)." },
                     speed: { type: "number", default: "", min: 0, max: 5000, unit: "px/s", label: "Particle speed from here",
                         help: "Bind it to a flow sensor: the particles run this fast from this point on. Empty: as before it (the line's Speed at the start). 0: no flow, they stand still." },
+                    texture: { type: "enum", default: "", label: "Texture from here", bindable: false, visibleWhen: (q, p) => p.look === "pipe",
+                        options: [{ value: "", label: "As before" }].concat(PIPE_TEXTURES),
+                        help: "The pipe's look from this point on (steel into PVC, say). As before: the texture before it (the line's at the start)." },
                     d: { type: "number", default: 0, min: 0, max: 200, unit: "px", label: "Diameter from here", bindable: false, visibleWhen: (q, p) => p.look === "pipe",
                         help: "The pipe is this wide from this point on (0: as before it). A reducer is drawn where it changes." },
                     x: { type: "number", default: 0, unit: "px", label: "X (in its box)", bindable: false },
@@ -685,6 +785,13 @@ export const flowLine = defineComponent({
         flowInside: { type: "range", default: 0.35, min: 0, max: 1, step: 0.05, group: "Pipe", label: "Flow inside fittings",
             visibleWhen: (p) => p.look === "pipe" && p.fittings !== false,
             help: "How much of the liquid and the particles shows inside a tee, an elbow or a reducer, so the fitting is seen: 0 = hidden, 1 = all." },
+        texture: { type: "enum", default: "flat", group: "Pipe", label: "Texture", options: PIPE_TEXTURES, visibleWhen: (p) => p.look === "pipe",
+            help: "How the pipe looks. Flat and Glass show the liquid inside; the others are solid. Each point may change it from there on." },
+        paintColor: { type: "color", default: "#2f7fd1", group: "Pipe", label: "Paint colour",
+            visibleWhen: (p) => p.look === "pipe" && (p.texture === "painted" || (Array.isArray(p.points) && p.points.some((q) => q && q.texture === "painted"))),
+            help: "The colour of a Painted pipe: the colour code of what it carries. Bind it to show a state." },
+        flowOverSolid: { type: "boolean", default: true, group: "Pipe", label: "Particles over solid pipes", visibleWhen: (p) => p.look === "pipe",
+            help: "On: the particles run over a solid texture (the flow is seen, the liquid is not). Off: they show only where the pipe is flat or glass." },
         centerLine: { type: "boolean", default: false, group: "Pipe", label: "Centre highlight on the page", visibleWhen: (p) => p.look === "pipe",
             help: "The thin white line along the middle of the pipe. The editor always shows it (to see the points); on the page only when this is on." },
         valveStyle: { type: "enum", default: "gate", group: "Valves", label: "Valve style", options: VALVE_STYLES,
@@ -802,7 +909,10 @@ export const flowLine = defineComponent({
             const path = this.renderRoot.querySelector("[data-line]");
             const pts = this._points();
             const perPoint = hasPointSpeeds(pts);
-            const key = [JSON.stringify(pathPoints(pts)), perPoint, p.routing, p.cornerRadius, p.look, p.diameter, p.fittings, p.elbowStyle, p.teeLength, p.elbowLength, p.reducerLength, p.flowInside, p.count, p.reverse, p.repeat, p.easing, p.turnAlong, p.turnSmooth, p.particleRotation, p.particleSize, p.particle, this._gen, this._flip, els.length].join("|");
+            // the stretches whose solid texture hides the particles (Particles over solid pipes off)
+            const hideOn = p.look === "pipe" && p.flowOverSolid === false ? stretchTextures(pts, p.texture).map(isSolidTexture) : null;
+            const needStretches = perPoint || !!(hideOn && hideOn.some(Boolean));
+            const key = [JSON.stringify(pathPoints(pts)), perPoint, p.texture, p.flowOverSolid, p.routing, p.cornerRadius, p.look, p.diameter, p.fittings, p.elbowStyle, p.teeLength, p.elbowLength, p.reducerLength, p.flowInside, p.count, p.reverse, p.repeat, p.easing, p.turnAlong, p.turnSmooth, p.particleRotation, p.particleSize, p.particle, this._gen, this._flip, els.length].join("|");
             if (key !== this._key) {
                 this._key = key;
                 this._anims.forEach((a) => a.cancel());
@@ -825,7 +935,7 @@ export const flowLine = defineComponent({
                     const faded = Math.max(0, Math.min(1, pnum(p, "flowInside")));
                     // stretches at their own speeds: which stretch each sample is in (the sample nearest each point starts its stretch)
                     this._stretchOfSample = null;
-                    if (perPoint) {
+                    if (needStretches) {
                         let lastStart = 0;
                         const starts = pts.map((pt) => {
                             let best = lastStart, bd = Infinity;
@@ -837,9 +947,12 @@ export const flowLine = defineComponent({
                     }
                     const frames = samples.map((q, j) => {
                         const f = { transform: "translate(" + (q.x - half) + "px," + (q.y - half) + "px) rotate(" + ((turn ? q.a : 0) + spin) + "deg)" };
+                        if (hideOn && this._stretchOfSample && hideOn[this._stretchOfSample[j]]) { f.opacity = 0; return f; }
                         if (zones.length) { const at = (len * j) / Math.max(1, samples.length - 1); const inside = zones.filter((z) => Math.abs(at - z.at) <= z.reach);
                             // inside a valve's closed body nothing shows; inside a fitting the flow fades to flowInside
                             f.opacity = inside.some((z) => z.hidden) ? 0 : inside.length ? faded : 1; }
+                        // every frame says its opacity once any does: a frame without one would be blended between its neighbours
+                        else if (hideOn) f.opacity = 1;
                         return f;
                     });
                     // timed at the speed of now (80 while it stands still); later speeds are a playback rate against this one

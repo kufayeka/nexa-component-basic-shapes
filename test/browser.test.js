@@ -409,6 +409,58 @@ withHarness({
         assert.strictEqual(r.neck, 4, 'gate and control (bow-tie bodies) close the pipe between the flanges, flipped or not');
     });
 
+    await ok('flow line textures: each texture is drawn, a point changes it from there on (steel into PVC into glass), the liquid shows only through flat and glass, particles over solid pipes can be hidden', async () => {
+        const r = await js(`(async function () {
+            var d = NEXA.getComponent("kufayeka-flow-line");
+            var props = {}; Object.keys(d.defaults).forEach(function (k) { props[k] = d.defaults[k].value; });
+            props.look = "pipe"; props.liquid = true; props.count = 1; props.speed = 100;
+            var out = { textures: {} };
+            for (var t of ["steel", "chrome", "stainless", "copper", "pvc", "painted", "insulated", "glass"]) {
+                NexaTest.mount("tx" + t, "kufayeka-flow-line", Object.assign({}, props, { texture: t, points: [{ id: "a", x: 12, y: 20 }, { id: "b", x: 212, y: 20 }] }), { width: 224, height: 40 });
+                await NexaTest.settle();
+                var root = NexaTest.wc("tx" + t).renderRoot;
+                out.textures[t] = [root.querySelectorAll("[data-texture='" + t + "']").length > 0, root.querySelectorAll("[data-liquid] path").length > 0];
+            }
+            NexaTest.mount("txpaint", "kufayeka-flow-line", Object.assign({}, props, { texture: "painted", paintColor: "#ff0000", points: [{ id: "a", x: 12, y: 20 }, { id: "b", x: 212, y: 20 }] }), { width: 224, height: 40 });
+            await NexaTest.settle();
+            out.paint = Array.from(NexaTest.wc("txpaint").renderRoot.querySelectorAll("[data-texture='painted'] path")).some(function (e) { return e.getAttribute("stroke") === "#ff0000"; });
+            var pts = [{ id: "a", x: 12, y: 20 }, { id: "b", x: 212, y: 20, texture: "pvc" }, { id: "c", x: 412, y: 20, texture: "glass" }, { id: "e", x: 612, y: 20 }];
+            NexaTest.mount("txmix", "kufayeka-flow-line", Object.assign({}, props, { texture: "steel", flowOverSolid: false, points: pts }), { width: 624, height: 40 });
+            await NexaTest.settle();
+            var mix = NexaTest.wc("txmix"); mix.scrollIntoView(); await new Promise(function (r) { setTimeout(r, 150); });
+            out.mix = Array.from(mix.renderRoot.querySelectorAll("[data-texture]")).map(function (g) { return g.getAttribute("data-texture"); });
+            // the particle's opacity keyframes: hidden over steel and PVC (solid), seen over glass
+            var frames = mix.renderRoot.querySelector("[data-particle='0']").getAnimations()[0].effect.getKeyframes();
+            var at = function (x) { var best = null; frames.forEach(function (f) { var m = /translate\\(([-0-9.]+)px/.exec(f.transform); if (m && (!best || Math.abs(Number(m[1]) - x) < Math.abs(best.x - x))) best = { x: Number(m[1]), o: Number(f.opacity) }; }); return best && best.o; };
+            out.hidden = [at(100), at(300), at(500)];
+            return out;
+        })()`);
+        for (const t of ['steel', 'chrome', 'stainless', 'copper', 'pvc', 'painted', 'insulated']) assert.deepStrictEqual(r.textures[t], [true, false], t + ': drawn, solid (no liquid)');
+        assert.deepStrictEqual(r.textures.glass, [true, true], 'glass: the liquid shows');
+        assert.strictEqual(r.paint, true, 'painted takes the paint colour');
+        assert.deepStrictEqual(r.mix, ['steel', 'pvc', 'glass'], 'one run per texture, in order');
+        assert.deepStrictEqual(r.hidden, [0, 0, 1], 'particles over solid pipes off: hidden over steel and PVC, seen through glass');
+    });
+
+    await ok('flow line textures at a junction: a tee on a steel pipe is drawn layer by layer across all its branches (one piece of metal, not three stacked pipes)', async () => {
+        const r = await js(`(async function () {
+            var d = NEXA.getComponent("kufayeka-flow-line");
+            var props = {}; Object.keys(d.defaults).forEach(function (k) { props[k] = d.defaults[k].value; });
+            props.look = "pipe"; props.texture = "steel"; props.teeStyle = "fitting";
+            props.points = [{ id: "a", x: 10, y: 40 }, { id: "b", x: 110, y: 40, fit: { k: "tee", dirs: [{ x: 0, y: 1 }] } }, { id: "c", x: 210, y: 40 }];
+            NexaTest.mount("txtee", "kufayeka-flow-line", props, { width: 220, height: 120 });
+            await NexaTest.settle();
+            var root = NexaTest.wc("txtee").renderRoot;
+            var groups = root.querySelectorAll("[data-texture='steel']");
+            var layers = Array.from(root.querySelectorAll("[data-texture='steel'] > [data-texture-layer]"));
+            return { groups: groups.length, layers: layers.length, perLayer: layers.map(function (g) { return g.querySelectorAll("path").length; }) };
+        })()`);
+        assert.strictEqual(r.groups, 1, 'one group for the steel of the whole pipe');
+        assert.strictEqual(r.layers, 8, 'its eight shades, each once');
+        // each shade holds every part: the run (2 tubes split by the tee), the 3 branches of the tee and their 3 shells
+        assert.ok(r.perLayer.every((n) => n >= 6), 'every shade holds every branch: ' + JSON.stringify(r.perLayer));
+    });
+
     await ok('flow line pipe: the white centre line is drawn in the editor, not on the page unless asked', async () => {
         const r = await js(`(async function () {
             var d = NEXA.getComponent("kufayeka-flow-line");
