@@ -331,6 +331,98 @@ withHarness({
         assert.strictEqual(r.weight, 'knx-select');
     });
 
+    await ok('flow line valve: opening 0 stops the whole line where it is, opening above 0 moves it again; the valve shows its state', async () => {
+        const r = await js(`(async function () {
+            var d = NEXA.getComponent("kufayeka-flow-line");
+            var props = {}; Object.keys(d.defaults).forEach(function (k) { props[k] = d.defaults[k].value; });
+            props.count = 1; props.speed = 100; props.look = "pipe";
+            props.points = [{ id: "p1", x: 12, y: 20 }, { id: "p2", x: 212, y: 20, fitting: "valve", opening: 0 }, { id: "p3", x: 412, y: 20 }];
+            NexaTest.mount("valve", "kufayeka-flow-line", props, { width: 424, height: 40 });
+            await NexaTest.settle();
+            var wc = NexaTest.wc("valve"); wc.scrollIntoView(); await new Promise(function (r) { setTimeout(r, 150); });
+            var anim = function () { return wc.renderRoot.querySelector("[data-particle='0']").getAnimations()[0]; };
+            var valve = function () { return wc.renderRoot.querySelector("[data-valve]").getAttribute("data-open"); };
+            var out = { closed: anim().playState, closedShown: valve() };
+            var first = anim();
+            NexaTest.setProps("valve", { points: props.points.map(function (q) { return q.id === "p2" ? Object.assign({}, q, { opening: 40 }) : q; }) });
+            await NexaTest.settle();
+            out.open = anim().playState; out.openShown = valve(); out.same = anim() === first;
+            return out;
+        })()`);
+        assert.deepStrictEqual([r.closed, r.closedShown], ['paused', 'no']);
+        assert.deepStrictEqual([r.open, r.openShown], ['running', 'yes']);
+        assert.strictEqual(r.same, true, 'the opening does not make the particles again (they go on from where they stood)');
+    });
+
+    await ok('flow line speed per point: a stretch bound to a flow sensor runs at its own speed, and a new reading never throws a particle back', async () => {
+        const r = await js(`(async function () {
+            var d = NEXA.getComponent("kufayeka-flow-line");
+            var props = {}; Object.keys(d.defaults).forEach(function (k) { props[k] = d.defaults[k].value; });
+            props.count = 1; props.speed = 100;
+            var pts = function (s) { return [{ id: "p1", x: 12, y: 12 }, { id: "p2", x: 212, y: 12, speed: s }, { id: "p3", x: 412, y: 12 }]; };
+            props.points = pts(400);
+            NexaTest.mount("sens", "kufayeka-flow-line", props, { width: 424, height: 24 });
+            await NexaTest.settle();
+            var wc = NexaTest.wc("sens"); wc.scrollIntoView(); await new Promise(function (r) { setTimeout(r, 150); });
+            var anim = function () { return wc.renderRoot.querySelector("[data-particle='0']").getAnimations()[0]; };
+            var wait = function (ms) { return new Promise(function (r) { setTimeout(r, ms); }); };
+            // 200 px at 100 px/s + 200 px at 400 px/s = 2.5 s
+            var out = { ms: Math.round(anim().effect.getTiming().duration) };
+            var x = function () { return new DOMMatrix(getComputedStyle(wc.renderRoot.querySelector("[data-particle='0']")).transform).m41; };
+            var first = anim(), back = 0, last = -1;
+            for (var s = 50; s <= 600; s += 50) {
+                NexaTest.setProps("sens", { points: pts(s) }); await NexaTest.settle(); await wait(30);
+                var now = x(); if (last > 0 && now < last - 2 && now > 20) back++; last = now;
+            }
+            out.back = back; out.same = anim() === first;
+            NexaTest.setProps("sens", { points: pts(0) }); await NexaTest.settle();
+            out.zero = anim().playState;
+            return out;
+        })()`);
+        assert.ok(Math.abs(r.ms - 2500) <= 40, 'each stretch timed at its own speed (samples every 6 px): ' + r.ms);
+        assert.strictEqual(r.back, 0, 'never thrown back');
+        assert.strictEqual(r.same, true, 'the same animation all along');
+        assert.strictEqual(r.zero, 'paused', 'a sensor reading 0: no flow, it stands still');
+    });
+
+    await ok('flow line valve styles: built into the pipe between two flanges, every style, flipped puts the stem on the other side', async () => {
+        const r = await js(`(async function () {
+            var d = NEXA.getComponent("kufayeka-flow-line");
+            var props = {}; Object.keys(d.defaults).forEach(function (k) { props[k] = d.defaults[k].value; });
+            props.look = "pipe";
+            var out = {};
+            for (var st of ["gate", "globe", "ball", "butterfly", "control"]) for (var flip of [false, true]) {
+                var n = "vs" + st + flip;
+                props.points = [{ id: "a", x: 12, y: 60 }, { id: "b", x: 112, y: 60, fitting: "valve", valveStyle: st, valveFlip: flip }, { id: "c", x: 212, y: 60 }];
+                NexaTest.mount(n, "kufayeka-flow-line", props, { width: 224, height: 120 });
+                await NexaTest.settle();
+                var g = NexaTest.wc(n).renderRoot.querySelector("[data-valve]");
+                var st8 = g.querySelector("[data-valve-state]").getBoundingClientRect(), pipe = g.getBoundingClientRect();
+                out[st + flip] = [g.getAttribute("data-style"), g.querySelectorAll("[data-valve-flange]").length, st8.top + st8.height / 2 < NexaTest.wc(n).getBoundingClientRect().top + 60 ? "up" : "down"];
+            }
+            return out;
+        })()`);
+        for (const st of ['gate', 'globe', 'ball', 'butterfly', 'control']) {
+            assert.deepStrictEqual(r[st + 'false'], [st, 2, 'up'], st);
+            assert.deepStrictEqual(r[st + 'true'], [st, 2, 'down'], st + ' flipped');
+        }
+    });
+
+    await ok('flow line pipe: the white centre line is drawn in the editor, not on the page unless asked', async () => {
+        const r = await js(`(async function () {
+            var d = NEXA.getComponent("kufayeka-flow-line");
+            var props = {}; Object.keys(d.defaults).forEach(function (k) { props[k] = d.defaults[k].value; });
+            props.look = "pipe"; props.points = [{ id: "p1", x: 12, y: 20 }, { id: "p2", x: 212, y: 20 }];
+            var white = function (n) { return NexaTest.wc(n).renderRoot.querySelectorAll("[data-pipe] path[stroke='#ffffff']").length; };
+            NexaTest.mount("cpage", "kufayeka-flow-line", props, { width: 224, height: 40 });
+            NexaTest.mount("cedit", "kufayeka-flow-line", props, { width: 224, height: 40, design: true });
+            NexaTest.mount("con", "kufayeka-flow-line", Object.assign({}, props, { centerLine: true }), { width: 224, height: 40 });
+            await NexaTest.settle();
+            return [white("cpage"), white("cedit") > 0, white("con") > 0];
+        })()`);
+        assert.deepStrictEqual(r, [0, true, true]);
+    });
+
     await ok('no JavaScript errors in the page', async () => {
         assert.deepStrictEqual(logs.filter((l) => !/Lit is in dev mode/.test(l)), []);
     });

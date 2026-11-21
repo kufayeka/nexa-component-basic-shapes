@@ -246,7 +246,7 @@ function samplePath(pathEl, step, smooth) {
 
 const PIPE_DEFAULTS = { teeStyle: "flanged", reducerStyle: "concentric", elbowStyle: "fitting", teeLength: 1.8, elbowLength: 1.8, reducerLength: 1.8, flowInside: 0.35 };
 const POINT_FITTINGS = [{ value: "auto", label: "Auto" }, { value: "none", label: "None" }, { value: "elbow", label: "Elbow" }, { value: "tee", label: "Tee" },
-    { value: "cross", label: "Cross" }, { value: "reducer", label: "Reducer" }, { value: "flange", label: "Flange" }, { value: "cap", label: "Cap (end)" }];
+    { value: "cross", label: "Cross" }, { value: "reducer", label: "Reducer" }, { value: "flange", label: "Flange" }, { value: "cap", label: "Cap (end)" }, { value: "valve", label: "Valve" }];
 
 // a colour made darker (k < 0) or lighter (k > 0): any CSS colour
 function shade(color, k) {
@@ -264,6 +264,130 @@ function bandPts(q, u, w, extra, thick) {
 function taper(a, b, wa, wb, off) {
     const u = unitOf(a, b), n = { x: -u.y, y: u.x };
     return poly([[a.x + n.x * wa / 2, a.y + n.y * wa / 2], [b.x + n.x * (wb / 2 + off), b.y + n.y * (wb / 2 + off)], [b.x - n.x * (wb / 2 - off), b.y - n.y * (wb / 2 - off)], [a.x - n.x * wa / 2, a.y - n.y * wa / 2]]);
+}
+
+// ---- valves and the speed of each stretch ----------------------------------------------------------
+// A point may be a valve (point.fitting = "valve"). Its opening (0..100, bindable to the valve's position feedback) only says whether
+// the flow moves: any valve at 0 stops the whole line, because in one pipe without branches a closed valve stops everything in it.
+// How fast it moves comes from a flow sensor, not from the valve: point.speed (bindable) is the particles' speed from that point on,
+// and an empty one keeps the speed before it (the line's Speed at the start).
+
+/** A list item's field as a plain value: on the canvas a bound field is still its binding list, whose fixed value is `static`. */
+function plainValue(v) { return v && typeof v === "object" && "static" in v ? v.static : v; }
+/** A number that may be empty: undefined when nothing usable is set (so "inherit" and "0" stay different). */
+function optionalNumber(v) {
+    const raw = plainValue(v);
+    if (raw === undefined || raw === null || raw === "") return undefined;
+    const n = Number(raw);
+    return isFinite(n) ? n : undefined;
+}
+/** A valve's opening in percent: 100 (open) when it says nothing. */
+function valveOpening(q) { const n = optionalNumber(q && q.opening); return n === undefined ? 100 : Math.max(0, Math.min(100, n)); }
+/** Whether any valve on the line is closed (opening 0). */
+function anyValveClosed(pts) { return pts.some((q) => q && q.fitting === "valve" && valveOpening(q) <= 0); }
+/** Whether any point sets its own particle speed. */
+function hasPointSpeeds(pts) { return pts.some((q) => optionalNumber(q && q.speed) !== undefined); }
+/**
+ * The speed of each stretch between two points: the last point at or before it that sets its own speed, the line's speed before any.
+ * -> one number per stretch (pts.length - 1 of them).
+ */
+function stretchSpeeds(pts, lineSpeed) {
+    const out = [];
+    let current = lineSpeed;
+    for (let i = 0; i < pts.length - 1; i++) {
+        const own = optionalNumber(pts[i].speed);
+        if (own !== undefined) current = own;
+        out.push(current);
+    }
+    return out;
+}
+/** The points without what changes from moment to moment (opening, speed): what the particles' path is made of. */
+function pathPoints(pts) { return pts.map((q) => { const c = Object.assign({}, q); delete c.opening; delete c.speed; return c; }); }
+
+/**
+ * How the particles are timed along the sampled path when the stretches run at different speeds: each sample step takes
+ * (step length / its stretch's speed), and the keyframe offsets are where each sample falls in that time -> { offsets, ms }.
+ * `stretchOfSample[j]` says which stretch sample j lies in. Every speed must be above 0 (a stopped line is paused, not timed).
+ */
+function timedOffsets(len, sampleCount, stretchOfSample, speeds) {
+    const step = len / Math.max(1, sampleCount - 1);
+    const offsets = [0];
+    let total = 0;
+    for (let j = 1; j < sampleCount; j++) {
+        total += step / speeds[stretchOfSample[j - 1]];
+        offsets.push(total);
+    }
+    return { offsets: offsets.map((t) => (total > 0 ? t / total : 0)), ms: Math.max(50, total * 1000) };
+}
+/** Where a time fraction f falls among the samples (a fractional sample index), and back again. */
+function sampleAtTime(offsets, f) {
+    for (let j = 0; j < offsets.length - 1; j++) {
+        if (f <= offsets[j + 1]) { const span = offsets[j + 1] - offsets[j]; return j + (span > 0 ? (f - offsets[j]) / span : 0); }
+    }
+    return offsets.length - 1;
+}
+function timeAtSample(offsets, s) {
+    const j = Math.max(0, Math.min(offsets.length - 2, Math.floor(s)));
+    return offsets[j] + (offsets[j + 1] - offsets[j]) * (s - j);
+}
+
+const VALVE_STYLES = [{ value: "gate", label: "Gate (handwheel)" }, { value: "globe", label: "Globe (status light)" }, { value: "ball", label: "Ball (lever)" },
+    { value: "butterfly", label: "Butterfly (disc in the flow)" }, { value: "control", label: "Control (actuator)" }];
+
+/**
+ * One valve on point i, built INTO the pipe: the run ends in a flange on each side and the valve's body sits between them in the pipe's own
+ * metal, so it reads as part of the pipe, not a sticker on it. Only the part that shows the state is coloured (the handwheel, the light,
+ * the lever, the disc, the actuator). Drawn in its own frame (x along the line, the top towards -y) at the scale of the pipe's width D;
+ * `flip` puts the stem and what is on it on the other side of the pipe.
+ */
+function valveView(p, pts, i, D) {
+    const q = pts[i];
+    const a = pts[Math.max(0, i - 1)], b = pts[Math.min(pts.length - 1, i + 1)];
+    const u = unitOf(a === q ? q : a, b === q ? q : b);
+    const angle = Math.atan2(u.y, u.x) * 180 / Math.PI;
+    const open = valveOpening(q) > 0;
+    const state = open ? (p.valveOpenColor || "#2e9e4f") : (p.valveClosedColor || "#d0342c");
+    const base = p.pipeColor || "#8a99ad";
+    const wall = shade(base, -0.45), shell = shade(base, -0.12);
+    const inside = open ? (p.liquid ? (p.liquidColor || "#2f8fff") : shade(base, 0.45)) : shade(base, -0.3);
+    const k = D / 16;
+    const s = q.valveFlip ? 1 : -1;
+    const style = q.valveStyle || p.valveStyle || "gate";
+    const line = { stroke: wall, "stroke-width": 1.5 };
+    const flanges = (gap) => svg`<rect data-valve-flange x="${-gap - 3}" y="${-13.6}" width="6" height="27.2" rx="1" fill="${shell}" stroke="${wall}"></rect>
+        <rect data-valve-flange x="${gap - 3}" y="${-13.6}" width="6" height="27.2" rx="1" fill="${shell}" stroke="${wall}"></rect>`;
+    let body = nothing;
+    if (style === "gate") body = svg`${flanges(24)}
+        <polygon points="-22,-15 -22,15 0,4 22,15 22,-15 0,-4" fill="${base}" stroke="${line.stroke}" stroke-width="1.5" stroke-linejoin="round"></polygon>
+        <rect x="-6" y="-6" width="12" height="12" rx="2" fill="${shell}" stroke="${wall}"></rect>
+        <rect x="-5" y="${s < 0 ? -30 : 6}" width="10" height="24" fill="${shell}" stroke="${wall}"></rect>
+        <line x1="0" y1="${s * 30}" x2="0" y2="${s * 40}" stroke="${wall}" stroke-width="2"></line>
+        <ellipse data-valve-state cx="0" cy="${s * 42}" rx="17" ry="4" fill="${state}" stroke="${wall}" stroke-width="1.5"></ellipse>`;
+    else if (style === "globe") body = svg`${flanges(26)}
+        <ellipse cx="0" cy="0" rx="22" ry="16" fill="${base}" stroke="${wall}" stroke-width="1.5"></ellipse>
+        <path d="M-10 ${s * 12} L-8 ${s * 28} L8 ${s * 28} L10 ${s * 12}" fill="${shell}" stroke="${wall}"></path>
+        <line x1="0" y1="${s * 28}" x2="0" y2="${s * 38}" stroke="${wall}" stroke-width="2"></line>
+        <circle data-valve-state cx="0" cy="${s * 44}" r="7" fill="${state}" stroke="${wall}" stroke-width="1.5"></circle>
+        <circle cx="0" cy="0" r="6" fill="${state}" stroke="${wall}"></circle>`;
+    else if (style === "ball") body = svg`${flanges(22)}
+        <rect x="-20" y="-13" width="40" height="26" rx="6" fill="${base}" stroke="${wall}" stroke-width="1.5"></rect>
+        <circle cx="0" cy="0" r="11" fill="${shell}" stroke="${wall}"></circle>
+        <circle cx="0" cy="0" r="6" fill="${inside}" stroke="${wall}"></circle>
+        <rect x="-3" y="${s < 0 ? -22 : 13}" width="6" height="9" fill="${shell}" stroke="${wall}"></rect>
+        ${open
+            ? svg`<line data-valve-state x1="0" y1="${s * 20}" x2="38" y2="${s * 20}" stroke="${state}" stroke-width="5" stroke-linecap="round"></line>`
+            : svg`<line data-valve-state x1="0" y1="${s * 20}" x2="0" y2="${s * 48}" stroke="${state}" stroke-width="5" stroke-linecap="round"></line>`}`;
+    else if (style === "butterfly") body = svg`${flanges(12)}
+        <rect x="-9" y="-16" width="18" height="32" rx="3" fill="${base}" stroke="${wall}" stroke-width="1.5"></rect>
+        <rect x="-9" y="-5" width="18" height="10" fill="${inside}"></rect>
+        <line data-valve-disc x1="0" y1="-11" x2="0" y2="11" stroke="${state}" stroke-width="3.5" stroke-linecap="round" transform="rotate(${open ? 80 : 0})"></line>
+        <rect x="-4" y="${s < 0 ? -30 : 16}" width="8" height="14" fill="${shell}" stroke="${wall}"></rect>
+        <rect data-valve-state x="-11" y="${s < 0 ? -40 : 30}" width="22" height="10" rx="2" fill="${state}" stroke="${wall}"></rect>`;
+    else body = svg`${flanges(24)}
+        <polygon points="-22,-14 -22,14 0,3 22,14 22,-14 0,-3" fill="${base}" stroke="${wall}" stroke-width="1.5" stroke-linejoin="round"></polygon>
+        <line x1="0" y1="0" x2="0" y2="${s * 30}" stroke="${wall}" stroke-width="2.5"></line>
+        <path data-valve-state d="M-22 ${s * 30} A22 16 0 0 ${s < 0 ? 1 : 0} 22 ${s * 30} Z" fill="${state}" stroke="${wall}" stroke-width="1.5"></path>`;
+    return svg`<g data-valve="${i}" data-style="${style}" data-open="${open ? "yes" : "no"}" transform="translate(${q.x} ${q.y}) rotate(${angle}) scale(${k})">${body}</g>`;
 }
 
 /** What a point asks for: its own fitting ("auto" when it says nothing). */
@@ -449,7 +573,7 @@ function pipeZones(p, pts, D) {
 }
 
 /** The pipe: every tube, shell, cone, band of this line and of the junctions it draws, layer by layer. */
-function pipeView(p, pts, D, dashes, marchStyle, dashLen) {
+function pipeView(p, pts, D, dashes, marchStyle, dashLen, showCenter) {
     const base = p.pipeColor || "#8a99ad";
     const wall = shade(base, -0.45), light = shade(base, 0.45), shell = shade(base, -0.12);
     const level = p.liquid ? Math.max(0, Math.min(1, p.liquidLevel === undefined || p.liquidLevel === "" ? 1 : Number(p.liquidLevel))) : 0;
@@ -469,7 +593,7 @@ function pipeView(p, pts, D, dashes, marchStyle, dashLen) {
         ${cones.map((c) => svg`<polygon points="${c.body}" fill="${shell}"></polygon>`)}
         ${level > 0 ? svg`<g data-liquid opacity="0.92">${layer(tubes, 0.6 * level, p.liquidColor || "#2f8fff")}${cones.map((c) => svg`<polygon points="${c.liq}" fill="${p.liquidColor || "#2f8fff"}"></polygon>`)}</g>` : nothing}
         ${layer(tubes, 0.18, light, 0.8)}
-        ${layer(tubes, 0.06, "#ffffff", 0.5)}
+        ${showCenter ? layer(tubes, 0.06, "#ffffff", 0.5) : nothing}
         ${veil > 0 ? svg`<g data-veil>${shellLayer(0.84, shell, veil)}${cones.map((c) => svg`<polygon points="${c.body}" fill="${shell}" opacity="${veil}"></polygon>`)}${plan.veils.map((v) => v(veil))}</g>` : nothing}
         ${plan.over}
         ${dashes ? svg`<path class="dashes" style="${marchStyle}" d="${linePath(pts, p.routing, pipeRadius(p, D))}" fill="none" stroke="${shade(base, 0.7)}" stroke-width="${Math.max(2, D * 0.22)}" stroke-dasharray="${dashLen},${dashLen}" stroke-linecap="round"></path>` : nothing}
@@ -496,8 +620,8 @@ export const flowLine = defineComponent({
                     return { id: "p" + n, x: (Number(last.x) || 0) + 60, y: Number(last.y) || 0 };
                 },
                 fields: {
-                    fitting: { type: "enum", default: "auto", label: "Fitting here", options: POINT_FITTINGS, bindable: false, visibleWhen: (q, p) => p.look === "pipe",
-                        help: "Auto: what the joins and bends make it (a tee where pipes branch, an elbow on a bend). Or this point's own." },
+                    fitting: { type: "enum", default: "auto", label: "Fitting here", options: POINT_FITTINGS, bindable: false,
+                        help: "Auto: what the joins and bends make it (a tee where pipes branch, an elbow on a bend). Or this point's own. A valve shows on a plain line too; the other fittings only on a pipe." },
                     elbowStyle: { type: "enum", default: "line", label: "Elbow style", bindable: false, visibleWhen: (q, p) => p.look === "pipe" && q.fitting === "elbow",
                         options: [{ value: "line", label: "Like the line" }, { value: "sharp", label: "Sharp (mitre)" }, { value: "long", label: "Long radius bend" }, { value: "fitting", label: "Elbow fitting (welded)" }, { value: "flanged", label: "Flanged elbow" }] },
                     teeStyle: { type: "enum", default: "line", label: "Tee style", bindable: false, visibleWhen: (q, p) => p.look === "pipe" && (q.fitting === "tee" || q.fitting === "cross"),
@@ -507,6 +631,14 @@ export const flowLine = defineComponent({
                     length: { type: "number", default: 0, min: 0, max: 6, step: 0.1, unit: "× Ø", label: "Fitting length", bindable: false,
                         visibleWhen: (q, p) => p.look === "pipe" && (["elbow", "tee", "cross", "reducer"].indexOf(q.fitting) !== -1 || Number(q.d) > 0),
                         help: "0: the line's length for this fitting." },
+                    valveStyle: { type: "enum", default: "", label: "Valve style", bindable: false, visibleWhen: (q) => q.fitting === "valve",
+                        options: [{ value: "", label: "Like the line" }].concat(VALVE_STYLES) },
+                    valveFlip: { type: "boolean", default: false, label: "Valve flipped", bindable: false, visibleWhen: (q) => q.fitting === "valve",
+                        help: "Puts the handwheel / lever / actuator on the other side of the pipe." },
+                    opening: { type: "number", default: 100, min: 0, max: 100, unit: "%", label: "Valve opening", visibleWhen: (q) => q.fitting === "valve",
+                        help: "Bind it to the valve's position. 0: closed, and the particles of the whole line stand still where they are. Above 0: they move (at the speed set on the points)." },
+                    speed: { type: "number", default: "", min: 0, max: 5000, unit: "px/s", label: "Particle speed from here",
+                        help: "Bind it to a flow sensor: the particles run this fast from this point on. Empty: as before it (the line's Speed at the start). 0: no flow, they stand still." },
                     d: { type: "number", default: 0, min: 0, max: 200, unit: "px", label: "Diameter from here", bindable: false, visibleWhen: (q, p) => p.look === "pipe",
                         help: "The pipe is this wide from this point on (0: as before it). A reducer is drawn where it changes." },
                     x: { type: "number", default: 0, unit: "px", label: "X (in its box)", bindable: false },
@@ -548,6 +680,12 @@ export const flowLine = defineComponent({
         flowInside: { type: "range", default: 0.35, min: 0, max: 1, step: 0.05, group: "Pipe", label: "Flow inside fittings",
             visibleWhen: (p) => p.look === "pipe" && p.fittings !== false,
             help: "How much of the liquid and the particles shows inside a tee, an elbow or a reducer, so the fitting is seen: 0 = hidden, 1 = all." },
+        centerLine: { type: "boolean", default: false, group: "Pipe", label: "Centre highlight on the page", visibleWhen: (p) => p.look === "pipe",
+            help: "The thin white line along the middle of the pipe. The editor always shows it (to see the points); on the page only when this is on." },
+        valveStyle: { type: "enum", default: "gate", group: "Valves", label: "Valve style", options: VALVE_STYLES,
+            help: "How a point set to Fitting = Valve is drawn (each point may choose its own)." },
+        valveOpenColor: { type: "color", default: "#2e9e4f", group: "Valves", label: "Open colour" },
+        valveClosedColor: { type: "color", default: "#d0342c", group: "Valves", label: "Closed colour" },
         liquid: { type: "boolean", default: false, group: "Pipe", label: "Liquid inside", visibleWhen: (p) => p.look === "pipe" },
         liquidColor: { type: "color", default: "#2f8fff", group: "Pipe", label: "Liquid colour", visibleWhen: (p) => p.look === "pipe" && !!p.liquid },
         liquidLevel: { type: "range", default: 1, min: 0, max: 1, step: 0.05, group: "Pipe", label: "Liquid level", visibleWhen: (p) => p.look === "pipe" && !!p.liquid,
@@ -634,8 +772,16 @@ export const flowLine = defineComponent({
             const n = v === undefined || v === null || v === "" ? 80 : Number(v);
             return isFinite(n) ? n : 80;
         }
+        _points() { return Array.isArray(this.p.points) && this.p.points.length >= 2 ? this.p.points : DEFAULT_POINTS; }
+        /** Whether the flow moves at all: no valve closed, and a speed above 0 everywhere (each stretch's own, or the line's). */
+        _flowing() {
+            const pts = this._points();
+            if (anyValveClosed(pts)) return false;
+            if (hasPointSpeeds(pts)) return stretchSpeeds(pts, this._speed()).every((v) => v > 0);
+            return this._speed() > 0;
+        }
         _play() {
-            const on = this._running() && this._seen && this._speed() > 0;
+            const on = this._running() && this._seen && this._flowing();
             this._anims.forEach((a) => { if (on && a.playState !== "running" && a.playState !== "finished") a.play(); else if (!on && a.playState === "running") a.pause(); });
         }
         /**
@@ -649,7 +795,9 @@ export const flowLine = defineComponent({
             const p = this.p;
             const els = Array.from(this.renderRoot.querySelectorAll(".p"));
             const path = this.renderRoot.querySelector("[data-line]");
-            const key = [JSON.stringify(p.points), p.routing, p.cornerRadius, p.look, p.diameter, p.fittings, p.elbowStyle, p.teeLength, p.elbowLength, p.reducerLength, p.flowInside, p.count, p.reverse, p.repeat, p.easing, p.turnAlong, p.turnSmooth, p.particleRotation, p.particleSize, p.particle, this._gen, this._flip, els.length].join("|");
+            const pts = this._points();
+            const perPoint = hasPointSpeeds(pts);
+            const key = [JSON.stringify(pathPoints(pts)), perPoint, p.routing, p.cornerRadius, p.look, p.diameter, p.fittings, p.elbowStyle, p.teeLength, p.elbowLength, p.reducerLength, p.flowInside, p.count, p.reverse, p.repeat, p.easing, p.turnAlong, p.turnSmooth, p.particleRotation, p.particleSize, p.particle, this._gen, this._flip, els.length].join("|");
             if (key !== this._key) {
                 this._key = key;
                 this._anims.forEach((a) => a.cancel());
@@ -661,12 +809,27 @@ export const flowLine = defineComponent({
                     const spin = Number(p.particleRotation) || 0;
                     // inside a pipe's fittings the particles fade to flowInside (an opacity keyframe: the compositor runs it too)
                     const D = Math.max(2, Number(p.diameter) || 16);
-                    const zones = pipeZones(p, Array.isArray(p.points) ? p.points : DEFAULT_POINTS, D).map((z) => {
+                    // a valve is a zone too: the particles fade while they pass through its body (drawn under them)
+                    const valveSize = (p.look === "pipe" ? D : Math.max(8, (p.strokeWidth !== undefined && p.strokeWidth !== "" ? Number(p.strokeWidth) : 3) * 3)) * 3;
+                    const valveZones = pts.filter((q) => q && q.fitting === "valve").map((q) => ({ at: { x: q.x, y: q.y }, reach: valveSize / 2 }));
+                    const zones = pipeZones(p, pts, D).concat(valveZones).map((z) => {
                         let best = 0, bd = Infinity;
                         samples.forEach((q, j) => { const dd = Math.hypot(q.x - z.at.x, q.y - z.at.y); if (dd < bd) { bd = dd; best = j; } });
                         return { at: (len * best) / Math.max(1, samples.length - 1), reach: z.reach };
                     });
                     const faded = Math.max(0, Math.min(1, pnum(p, "flowInside")));
+                    // stretches at their own speeds: which stretch each sample is in (the sample nearest each point starts its stretch)
+                    this._stretchOfSample = null;
+                    if (perPoint) {
+                        let lastStart = 0;
+                        const starts = pts.map((pt) => {
+                            let best = lastStart, bd = Infinity;
+                            for (let j = lastStart; j < samples.length; j++) { const dd = Math.hypot(samples[j].x - pt.x, samples[j].y - pt.y); if (dd < bd) { bd = dd; best = j; } }
+                            lastStart = best;
+                            return best;
+                        });
+                        this._stretchOfSample = samples.map((q, j) => { let k = 0; while (k < pts.length - 2 && starts[k + 1] <= j) k++; return k; });
+                    }
                     const frames = samples.map((q, j) => {
                         const f = { transform: "translate(" + (q.x - half) + "px," + (q.y - half) + "px) rotate(" + ((turn ? q.a : 0) + spin) + "deg)" };
                         if (zones.length) { const at = (len * j) / Math.max(1, samples.length - 1); f.opacity = zones.some((z) => Math.abs(at - z.at) <= z.reach) ? faded : 1; }
@@ -674,7 +837,17 @@ export const flowLine = defineComponent({
                     });
                     // timed at the speed of now (80 while it stands still); later speeds are a playback rate against this one
                     this._base = this._speed() > 0 ? this._speed() : 80;
-                    const ms = Math.max(50, (len / this._base) * 1000);
+                    let ms = Math.max(50, (len / this._base) * 1000);
+                    this._frames = frames; this._len = len; this._speedKey = "";
+                    if (perPoint) {
+                        // each stretch at its own speed: uneven keyframe offsets (a stopped stretch is timed at 80 until it moves again)
+                        const speeds = stretchSpeeds(pts, this._speed()).map((v) => (v > 0 ? v : 80));
+                        const timed = timedOffsets(len, samples.length, this._stretchOfSample, speeds);
+                        timed.offsets.forEach((o, j) => { frames[j].offset = o; });
+                        ms = timed.ms;
+                        this._offsets = timed.offsets;
+                        this._speedKey = speeds.join(",");
+                    }
                     const once = p.repeat === "once";
                     const back = !!p.reverse !== this._flip;
                     // a loop's "cycle": the first particle's rounds, counted by the one slow check in mounted()
@@ -690,7 +863,8 @@ export const flowLine = defineComponent({
             }
             // the speed of now, as how fast the animations play: each particle goes on from where it is
             const speed = this._speed();
-            if (speed > 0 && this._base) {
+            if (perPoint) this._retime(pts);
+            else if (speed > 0 && this._base) {
                 const rate = speed / this._base;
                 this._anims.forEach((a) => {
                     if (Math.abs(a.playbackRate - rate) < 1e-9) return;
@@ -699,6 +873,42 @@ export const flowLine = defineComponent({
             }
             this._play();
         }
+        /**
+         * Stretches at their own speeds (flow sensors) that changed: the animations are timed again with the new keyframe offsets, and
+         * each particle is put back at the very place it was, so it goes on from there (made again, they would all jump to the start).
+         * A stopped stretch changes nothing here: the line is paused by _play() and keeps its timing until it moves again.
+         */
+        _retime(pts) {
+            const speeds = stretchSpeeds(pts, this._speed());
+            if (!this._frames || !this._stretchOfSample || !speeds.every((v) => v > 0)) return;
+            const speedKey = speeds.join(",");
+            if (speedKey === this._speedKey) return;
+            this._speedKey = speedKey;
+            const oldOffsets = this._offsets, oldMs = this._ms;
+            const timed = timedOffsets(this._len, this._frames.length, this._stretchOfSample, speeds);
+            const frames = this._frames.map((f, j) => Object.assign({}, f, { offset: timed.offsets[j] }));
+            this._frames = frames; this._offsets = timed.offsets; this._ms = timed.ms;
+            const back = !!this.p.reverse !== this._flip;
+            this._anims.forEach((a) => {
+                const delay = Number(a.effect.getTiming().delay) || 0;
+                const local = Number(a.currentTime) || 0;
+                const rel = local - delay;
+                const newDelay = delay * timed.ms / oldMs;
+                a.effect.setKeyframes(frames);
+                if (rel < 0) {
+                    // not started yet (a Once run waiting its turn): the same share of its wait
+                    a.effect.updateTiming({ duration: timed.ms, delay: newDelay });
+                    a.currentTime = local * timed.ms / oldMs;
+                    return;
+                }
+                const rounds = Math.floor(rel / oldMs);
+                const f = (rel - rounds * oldMs) / oldMs;
+                const place = sampleAtTime(oldOffsets, back ? 1 - f : f);
+                const g = timeAtSample(timed.offsets, place);
+                a.effect.updateTiming({ duration: timed.ms, delay: newDelay });
+                a.currentTime = newDelay + rounds * timed.ms + (back ? 1 - g : g) * timed.ms;
+            });
+        }
         render() {
             const p = this.p;
             const pts = Array.isArray(p.points) && p.points.length >= 2 ? p.points : DEFAULT_POINTS;
@@ -706,7 +916,7 @@ export const flowLine = defineComponent({
             const sw = p.strokeWidth !== undefined && p.strokeWidth !== "" ? Number(p.strokeWidth) : 3;
             const color = p.stroke || "#4a6fa5";
             // the moving dashes stand still at speed 0 too
-            const play = this._running() && this._speed() > 0 ? "running" : "paused";
+            const play = this._running() && this._flowing() ? "running" : "paused";
             const back = !!p.reverse !== this._flip;
             const speed = Math.max(1, this._speed());
             const dashes = p.motion === "dashes";
@@ -720,6 +930,9 @@ export const flowLine = defineComponent({
             const one = particleView(p, size, p.particleColor || "#00a3ff");
             const parts = [];
             for (let i = 0; i < n; i++) parts.push(html`<div class="p" data-particle="${i}">${one}</div>`);
+            // the valves (points set to Fitting = Valve), drawn over the line at a size that suits it
+            const valves = (size) => pts.map((q, i) => (q && q.fitting === "valve" ? valveView(p, pts, i, size) : nothing));
+            // the valves are as wide as the pipe (a plain line: its stroke, at least 8 px)
             const marchStyle = dashes ? "--d:" + (dashLen * 2 / speed) + "s;--o:" + (back ? dashLen * 2 : -dashLen * 2) + ";animation-play-state:" + play : "";
             if (p.look === "pipe") {
                 const D = Math.max(2, Number(p.diameter) || 16);
@@ -727,7 +940,8 @@ export const flowLine = defineComponent({
                 const full = linePath(pts, p.routing, pipeRadius(p, D));
                 return html`<svg class="line" width="100%" height="100%" @click="${() => this.emit("click", {})}">
                         ${svg`<path d="${full}" fill="none" stroke="transparent" stroke-width="${D + 6}" style="pointer-events:stroke"></path>
-                        <g opacity="${lineOpacity}">${pipeView(p, pts, D, dashes, marchStyle, Math.max(4, D * 0.6))}</g>
+                        <g opacity="${lineOpacity}">${pipeView(p, pts, D, dashes, marchStyle, Math.max(4, D * 0.6), this.isEditor || p.centerLine === true)}</g>
+                        ${valves(D)}
                         <path data-line d="${full}" fill="none" stroke="none"></path>`}
                     </svg><div class="parts" style="opacity:${particleOpacity}">${parts}</div>`;
             }
@@ -740,7 +954,8 @@ export const flowLine = defineComponent({
                     <path d="${d}" fill="none" stroke="transparent" stroke-width="${Math.max(12, sw + 8)}" style="pointer-events:stroke"></path>
                     <g opacity="${lineOpacity}"><path class="${dashes ? "dashes" : ""}" style="${marchStyle}" d="${d}" fill="none" stroke="${color}" stroke-width="${sw}"
                         stroke-dasharray="${dashes ? dashLen + "," + dashLen : dash(p.strokeStyle, sw)}" stroke-linecap="round" stroke-linejoin="round"
-                        marker-start="${p.arrowStart ? "url(#fl-start)" : nothing}" marker-end="${p.arrowEnd ? "url(#fl-end)" : nothing}" data-line></path></g>`}
+                        marker-start="${p.arrowStart ? "url(#fl-start)" : nothing}" marker-end="${p.arrowEnd ? "url(#fl-end)" : nothing}" data-line></path></g>
+                    ${valves(Math.max(8, sw * 3))}`}
                 </svg><div class="parts" style="opacity:${particleOpacity}">${parts}</div>`;
         }
     }
