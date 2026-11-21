@@ -263,6 +263,38 @@ withHarness({
         assert.deepStrictEqual(r, ['contain', 'contain', 'cover', 'fill']);
     });
 
+    await ok('flow line, Pipe look, each point its own: None takes the elbow off a bend, Elbow with its own style, a Flange on a straight run, a Cap at an end, a wider diameter from a point (a reducer there, None: a plain step)', async () => {
+        const r = await js(`(async function () {
+            var d = NEXA.getComponent("kufayeka-flow-line");
+            var base = {}; Object.keys(d.defaults).forEach(function (k) { base[k] = d.defaults[k].value; });
+            var pts = function (over) {
+                var list = [{ id: "p1", x: 20, y: 20 }, { id: "p2", x: 200, y: 20 }, { id: "p3", x: 200, y: 200 }, { id: "p4", x: 400, y: 200 }, { id: "p5", x: 400, y: 380 }];
+                Object.keys(over || {}).forEach(function (i) { list[i] = Object.assign({}, list[i], over[i]); });
+                return list;
+            };
+            NexaTest.mount("pp", "kufayeka-flow-line", Object.assign({}, base, { look: "pipe", diameter: 20, motion: "none", points: pts() }), { width: 440, height: 420 });
+            await NexaTest.settle();
+            var root = NexaTest.wc("pp").renderRoot;
+            var kinds = function () { return (root.querySelector("[data-pipe]").dataset.fittings || "").split(" ").filter(Boolean).sort(); };
+            var set = function (over) { NexaTest.setProps("pp", { points: pts(over) }); return NexaTest.settle(); };
+            var out = { auto: kinds() };
+            await set({ 1: { fitting: "none" } }); out.none = kinds();
+            await set({ 1: { fitting: "elbow", elbowStyle: "flanged" } }); out.flangedBands = Array.from(root.querySelectorAll("[data-band]")).filter(function (b) { return b.getAttribute("stroke") !== "none"; }).length;
+            await set({ 0: { fitting: "cap" } }); out.cap = kinds();
+            await set({ 3: { fitting: "flange" } }); out.flange = kinds();
+            await set({ 2: { d: 36 } }); out.wider = kinds(); out.tubes = root.querySelectorAll("[data-pipe] > path[stroke-width='36']").length;
+            await set({ 2: { d: 36, fitting: "none" } }); out.step = kinds();
+            return out;
+        })()`);
+        assert.deepStrictEqual(r.auto, ['elbow', 'elbow', 'elbow'], 'three bends: three elbows');
+        assert.deepStrictEqual(r.none, ['elbow', 'elbow'], 'None on P2: no elbow there');
+        assert.strictEqual(r.flangedBands, 2, 'P2 a flanged elbow: its two flanges (the other elbows stay welded)');
+        assert.ok(r.cap.indexOf('cap') !== -1, 'a cap at the start');
+        assert.ok(r.flange.indexOf('flange') !== -1, 'a flange at P4');
+        assert.ok(r.wider.indexOf('reducer') !== -1 && r.tubes >= 1, 'from P3 on 36 wide, a reducer at P3');
+        assert.ok(r.step.indexOf('reducer') === -1, 'None at P3: a plain step, no reducer');
+    });
+
     await ok('inspector: tree groups from `group`, enums as choices, visibleWhen, edits', async () => {
         const r = await js(`(async function () {
             var ins = NexaTest.inspector("kufayeka-rect", {});

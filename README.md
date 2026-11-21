@@ -15,7 +15,7 @@ which makes this package the reference for the automatic panel.
 | `kufayeka-line` Line | stroke, strokeWidth, strokeStyle, arrowStart, arrowEnd, opacity | `click` |
 | `kufayeka-path` Freeform Path | pathData, fill, stroke, strokeWidth, strokeStyle, opacity | `click` |
 | `kufayeka-text-label` Text Label | text (may be a tag binding), color, font*, textAlign, textDecoration, lineHeight, letterSpacing, wordWrap, backgroundColor, padding | `click` `{ text }` |
-| `kufayeka-flow-line` Flow Line | points (set on the canvas; each point may be connected), connect, look (line / pipe), diameter, pipeColor, fittings, teeStyle (seamless / welded / flanged / saddle), teeLength, elbowStyle (sharp / long radius / welded / flanged), elbowLength, reducerStyle (concentric / eccentric / bushing / flanged), reducerLength, flowInside, liquid, liquidColor, liquidLevel, routing (straight / elbows / curved), cornerRadius, stroke, strokeWidth, strokeStyle, lineOpacity, arrowStart, arrowEnd, running, motion (particles / moving dashes / nothing), particle (dot, square, drop, arrow, icon, picture), particleIcon, particleImage, particleFit (contain / cover / stretch), count, particleSize, particleColor, particleOpacity, turnAlong, turnSmooth, particleRotation, speed (px/s), reverse, repeat (loop / once), easing | `click`, `cycle` (a particle reached the end). Actions: `start`, `stop`, `reverse`, `restart` |
+| `kufayeka-flow-line` Flow Line | points (set on the canvas, and per point in the Points list: fitting auto / none / elbow / tee / cross / reducer / flange / cap, its own style and length, the diameter from it on, X / Y; each point may be connected), connect, look (line / pipe), diameter, pipeColor, fittings, teeStyle (seamless / welded / flanged / saddle), teeLength, elbowStyle (sharp / long radius / welded / flanged), elbowLength, reducerStyle (concentric / eccentric / bushing / flanged), reducerLength, flowInside, liquid, liquidColor, liquidLevel, routing (straight / elbows / curved), cornerRadius, stroke, strokeWidth, strokeStyle, lineOpacity, arrowStart, arrowEnd, running, motion (particles / moving dashes / nothing), particle (dot, square, drop, arrow, icon, picture), particleIcon, particleImage, particleFit (contain / cover / stretch), count, particleSize, particleColor, particleOpacity, turnAlong, turnSmooth, particleRotation, speed (px/s), reverse, repeat (loop / once), easing | `click`, `cycle` (a particle reached the end). Actions: `start`, `stop`, `reverse`, `restart` |
 
 Prop names are unchanged from the pre-SDK version, so saved screens keep working;
 `strokeStyle`, `direction`, `fontWeight`, … are now real choices in the panel. Dropping a
@@ -37,7 +37,10 @@ level (bindable). Fittings are drawn by themselves, each in its style and length
 branch, a reducer where a narrower pipe meets a wider one end to end. The pipe that owns a junction draws every branch there layer by
 layer (walls, bodies, liquid ...), and the branches stop short of it, so the liquid and the particles run on through it without a seam;
 inside a fitting they show at Flow inside fittings (default 35%), so the fitting is seen. A point dropped on the body of another line makes a new point there and joins it (a
-branch: a tee). The editor works the fittings out and keeps them on the points (point.fit), so the page only draws them. Its path is the SDK's `linePath` (SDK.md §11b-1).
+branch: a tee). The editor works the fittings out and keeps them on the points (point.fit), so the page only draws them. **Each point its own** (the inspector Points list; a click on a point on the canvas opens its row): Fitting here overrides what the joins
+and bends would make (None takes an elbow off, Elbow / Tee / Cross / Reducer / Flange / Cap ask for one, each with its own style and
+length or the line's), and Diameter from here changes the pipe width from that point on, with a reducer drawn there (None: a plain step).
+Its path is the SDK's `linePath` (SDK.md §11b-1).
 
 ```
 dist/shapes.js                   the nine components (ES module, no build step)

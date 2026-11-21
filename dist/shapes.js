@@ -236,14 +236,17 @@ function samplePath(pathEl, step, smooth) {
 // ---- the "pipe" look of a Flow Line ----------------------------------------------------------------------------------------------------
 // A tube drawn as layers of strokes along the path, so every bend and curve is right at once. Where pipes meet, the editor works out who
 // draws what and keeps it on the points (point.fit, src/features/canvas/model/line-geometry.js markFittings):
-//   { k: "tee" | "cross", d, dirs }   this pipe draws the junction: its own run and the first stretch of every other branch (dirs: their
-//                                     directions and widths), LAYER BY LAYER together (all walls, then all bodies, then all liquids ...),
-//                                     so the inside runs on through the junction without a seam
+//   { k: "tee" | "cross", d, dirs }   this pipe draws the junction: its own run and the first stretch of every other branch, LAYER BY
+//                                     LAYER together (all walls, then all bodies, then all liquids ...): the inside runs on without a seam
 //   { k: "into", trim }               this pipe's end goes into another's junction: it is drawn short of it by `trim`
 //   { k: "joint", d }                 this narrower pipe meets a wider one (width d) end to end: it draws the reducer
+// Each point may say otherwise (the Points list of the inspector): point.fitting = auto (the above) | none | elbow | tee | cross | reducer |
+// flange | cap, with its own style and length (0: the line's), and point.d = the diameter from this point on (a reducer where it changes).
 // Inside a fitting the liquid and the particles show at `flowInside` (the fitting's shell is laid over them again), so the fitting is seen.
 
 const PIPE_DEFAULTS = { teeStyle: "flanged", reducerStyle: "concentric", elbowStyle: "fitting", teeLength: 1.8, elbowLength: 1.8, reducerLength: 1.8, flowInside: 0.35 };
+const POINT_FITTINGS = [{ value: "auto", label: "Auto" }, { value: "none", label: "None" }, { value: "elbow", label: "Elbow" }, { value: "tee", label: "Tee" },
+    { value: "cross", label: "Cross" }, { value: "reducer", label: "Reducer" }, { value: "flange", label: "Flange" }, { value: "cap", label: "Cap (end)" }];
 
 // a colour made darker (k < 0) or lighter (k > 0): any CSS colour
 function shade(color, k) {
@@ -254,51 +257,54 @@ function unitOf(a, b) { const dx = b.x - a.x, dy = b.y - a.y, l = Math.hypot(dx,
 function along(q, u, s) { return { x: q.x + u.x * s, y: q.y + u.y * s }; }
 function seg() { return "M" + Array.from(arguments).map((q) => q.x.toFixed(1) + " " + q.y.toFixed(1)).join(" L"); }
 function poly(list) { return list.map((q) => q[0].toFixed(1) + "," + q[1].toFixed(1)).join(" "); }
-// a band across a pipe at q (the pipe along u): a weld line (extra 0) or a flange ring
 function bandPts(q, u, w, extra, thick) {
     const n = { x: -u.y, y: u.x }, h = w / 2 + extra, a = along(q, u, -thick / 2), b = along(q, u, thick / 2);
     return poly([[a.x + n.x * h, a.y + n.y * h], [b.x + n.x * h, b.y + n.y * h], [b.x - n.x * h, b.y - n.y * h], [a.x - n.x * h, a.y - n.y * h]]);
 }
-// a taper from a (width wa) to b (width wb), its narrow end moved sideways by off (an eccentric reducer)
 function taper(a, b, wa, wb, off) {
     const u = unitOf(a, b), n = { x: -u.y, y: u.x };
     return poly([[a.x + n.x * wa / 2, a.y + n.y * wa / 2], [b.x + n.x * (wb / 2 + off), b.y + n.y * (wb / 2 + off)], [b.x - n.x * (wb / 2 - off), b.y - n.y * (wb / 2 - off)], [a.x - n.x * wa / 2, a.y - n.y * wa / 2]]);
 }
 
-/** The corners of the drawn path that bend (an elbowed line's elbows too), each with its two directions. */
+/** What a point asks for: its own fitting ("auto" when it says nothing). */
+function pointFitting(q) { return (q && q.fitting) || "auto"; }
+/** A point's own style / length for its fitting, or the line's. */
+function pointStyle(p, q, kind) {
+    const own = q && q[kind + "Style"];
+    return own && own !== "line" ? own : (p[kind + "Style"] || PIPE_DEFAULTS[kind + "Style"]);
+}
+function pointLength(p, q, kind) { const own = Number(q && q.length); return own > 0 ? own : pnum(p, kind + "Length"); }
+
+/** The width of each stretch: the line's diameter, or the last point before it that sets its own (point.d). */
+function stretchWidths(pts, D) {
+    const out = [];
+    let cur = D;
+    for (let i = 0; i < pts.length - 1; i++) {
+        const d = Number(pts[i].d);
+        if (d > 0) cur = d;
+        out.push(cur);
+    }
+    return out;
+}
+
+/** The corners of a run of points that bend (an elbowed run's elbows too), with the point they belong to (-1: an elbow of the routing). */
 function pipeBends(pts, routing) {
     if (routing === "curved") return [];
-    let all = pts;
+    let all = pts.map((q, i) => ({ x: q.x, y: q.y, i }));
     if (routing === "orthogonal") {
         all = [];
-        pts.forEach((q, i) => { if (i > 0) { const a = all[all.length - 1]; if (a.x !== q.x && a.y !== q.y) all.push({ x: q.x, y: a.y }); } all.push({ x: q.x, y: q.y }); });
+        pts.forEach((q, i) => { if (i > 0) { const a = all[all.length - 1]; if (a.x !== q.x && a.y !== q.y) all.push({ x: q.x, y: a.y, i: -1 }); } all.push({ x: q.x, y: q.y, i }); });
     }
     const out = [];
-    for (let i = 1; i < all.length - 1; i++) {
-        const a = all[i - 1], k = all[i], c = all[i + 1];
+    for (let j = 1; j < all.length - 1; j++) {
+        const a = all[j - 1], k = all[j], c = all[j + 1];
         if (Math.abs((k.x - a.x) * (c.y - k.y) - (k.y - a.y) * (c.x - k.x)) <= 0.5) continue;
-        out.push({ k: k, u1: unitOf(a, k), u2: unitOf(k, c), l1: Math.hypot(k.x - a.x, k.y - a.y), l2: Math.hypot(c.x - k.x, c.y - k.y) });
+        out.push({ k: { x: k.x, y: k.y }, i: k.i, u1: unitOf(a, k), u2: unitOf(k, c), l1: Math.hypot(k.x - a.x, k.y - a.y), l2: Math.hypot(c.x - k.x, c.y - k.y) });
     }
     return out;
 }
 
-/** The points as the tube is drawn: an end that goes into another's junction, or that ends in a reducer, stops short. */
-function pipeDrawPoints(p, pts, D) {
-    const out = pts.map((q) => ({ x: q.x, y: q.y }));
-    [0, pts.length - 1].forEach((i) => {
-        const f = pts[i].fit;
-        if (!f) return;
-        let cut = 0;
-        if (f.k === "into") cut = Number(f.trim) || 0;
-        else if (f.k === "joint" && p.fittings !== false && pnum(p, "reducerLength") > 0 && p.reducerStyle !== "step") cut = pnum(p, "reducerLength") * Math.max(D, Number(f.d) || D);
-        if (!cut) return;
-        const j = i === 0 ? 1 : pts.length - 2, len = Math.hypot(pts[j].x - pts[i].x, pts[j].y - pts[i].y);
-        out[i] = along(pts[i], unitOf(pts[i], pts[j]), Math.min(cut, len * 0.9));
-    });
-    return out;
-}
-
-/** The corner radius the tube is drawn with: what the elbow style asks for (fittings off: the line's own corner radius). */
+/** The corner radius the tube is drawn with: what the line's elbow style asks for (fittings off: the line's own corner radius). */
 function pipeRadius(p, D) {
     if (p.routing === "curved") return 0;
     if (p.fittings === false) return Number(p.cornerRadius) || 0;
@@ -307,22 +313,139 @@ function pipeRadius(p, D) {
 }
 
 /**
- * Where along the line the particles are inside a fitting, as stretches of the line's points [{ at: {x, y}, reach }] (the particles there
- * show at flowInside).
+ * The whole plan of a pipe: its tubes (runs of one width, ends drawn short where they go into a junction or a reducer), and its fittings
+ * with where they are along the line (for the particles) -> { tubes, shells, cones, over, veils, kinds, zones: [{ at, reach }] }.
  */
+function pipePlan(p, pts, D) {
+    const base = p.pipeColor || "#8a99ad";
+    const wall = shade(base, -0.45), shell = shade(base, -0.12);
+    const on = p.fittings !== false;
+    const radius = pipeRadius(p, D);
+    const widths = stretchWidths(pts, D);
+    const level = p.liquid ? Math.max(0, Math.min(1, p.liquidLevel === undefined || p.liquidLevel === "" ? 1 : Number(p.liquidLevel))) : 0;
+    const plan = { tubes: [], shells: [], cones: [], over: [], veils: [], kinds: [], zones: [] };
+    const band = (q, u, w, flanged) => plan.over.push(svg`<polygon data-band points="${bandPts(q, u, w, flanged ? 4 : 0, flanged ? 5 : 1.6)}" fill="${flanged ? shell : wall}" stroke="${flanged ? wall : "none"}"></polygon>`);
+    const cone = (from, to, wa, wb, st) => {
+        const off = st === "eccentric" ? (wa - wb) / 2 : 0;
+        plan.cones.push({ wall: taper(from, to, wa, wb, off), body: taper(from, to, wa * 0.8, wb * 0.8, off), liq: taper(from, to, wa * 0.6 * level, wb * 0.6 * level, off) });
+        if (st === "flanged") { band(from, unitOf(from, to), wa, true); band(to, unitOf(from, to), wb, true); }
+    };
+    const n = pts.length;
+    // where each run starts and ends short: cuts[i] = how far the tube stays away from point i (into a junction, a reducer)
+    const cutStart = {}, cutEnd = {};
+    const widthAt = (i) => Math.max(i > 0 ? widths[i - 1] : 0, i < n - 1 ? widths[i] : 0);
+
+    // ---- the ends: into another's junction, a reducer against a wider pipe, a cap
+    [0, n - 1].forEach((i) => {
+        const q = pts[i], f = q.fit, own = pointFitting(q), j = i === 0 ? 1 : n - 2, u = unitOf(q, pts[j]), w = widths[i === 0 ? 0 : n - 2];
+        const room = Math.hypot(pts[j].x - q.x, pts[j].y - q.y) * 0.9;
+        const keep = (len) => { if (i === 0) cutStart[0] = len; else cutEnd[n - 1] = len; };
+        if (f && f.k === "into") { keep(Math.min(Number(f.trim) || 0, room)); plan.zones.push({ at: q, reach: Number(f.trim) || 0 }); return; }
+        if (on && own === "cap") {
+            const t = w * 0.45;
+            plan.shells.push({ d: seg(along(q, u, w * 0.4), along(q, u, -t * 0.6)), w: w * 1.18, cap: true });
+            band(along(q, u, w * 0.4), u, w * 1.18, false);
+            plan.kinds.push("cap");
+            plan.zones.push({ at: q, reach: w * 0.4 });
+            return;
+        }
+        if (f && f.k === "joint" && on && own !== "none") {
+            const st = pointStyle(p, q, "reducer"), W = Math.max(w, Number(f.d) || w);
+            if (st === "step") { band(q, u, W, true); plan.kinds.push("reducer"); return; }
+            const L = Math.min(pointLength(p, q, "reducer") * W, room), s = along(q, u, L);
+            cone(q, s, W, w, st);
+            keep(L);
+            plan.kinds.push("reducer");
+            plan.zones.push({ at: q, reach: L });
+        }
+    });
+
+    // ---- a change of width at a middle point: a reducer there (none: a plain step)
+    for (let i = 1; i < n - 1; i++) {
+        const a = widths[i - 1], b = widths[i];
+        if (Math.abs(a - b) < 0.5) continue;
+        const q = pts[i];
+        if (!on || pointFitting(q) === "none") continue;
+        const st = pointStyle(p, q, "reducer");
+        const wideFirst = a > b, W = Math.max(a, b), w = Math.min(a, b);
+        // the cone goes into the narrower stretch
+        const to = pts[wideFirst ? i + 1 : i - 1], u = unitOf(q, to);
+        if (st === "step") { band(q, u, W, true); plan.kinds.push("reducer"); continue; }
+        const L = Math.min(pointLength(p, q, "reducer") * W, Math.hypot(to.x - q.x, to.y - q.y) * 0.9);
+        cone(q, along(q, u, L), W, w, st);
+        if (wideFirst) cutStart[i] = L; else cutEnd[i] = L;
+        plan.kinds.push("reducer");
+        plan.zones.push({ at: q, reach: L });
+    }
+
+    // ---- the tubes: runs of one width
+    let s0 = 0;
+    for (let i = 1; i <= n - 1; i++) {
+        if (i < n - 1 && Math.abs(widths[i] - widths[i - 1]) < 0.5) continue;
+        const run = pts.slice(s0, i + 1).map((q) => ({ x: q.x, y: q.y }));
+        if (cutStart[s0]) run[0] = along(run[0], unitOf(run[0], run[1]), cutStart[s0]);
+        if (cutEnd[i]) run[run.length - 1] = along(run[run.length - 1], unitOf(run[run.length - 1], run[run.length - 2]), cutEnd[i]);
+        plan.tubes.push({ d: linePath(run, p.routing, Math.min(radius, widths[s0] * 1.8)), w: widths[s0] });
+        s0 = i;
+    }
+
+    // ---- elbows: the line's style on every bend, a point's own where it asks (none: no elbow there)
+    if (on) {
+        pipeBends(pts, p.routing).forEach((b) => {
+            const q = b.i >= 0 ? pts[b.i] : null, own = q ? pointFitting(q) : "auto";
+            if (own === "none") return;
+            const st = own === "elbow" ? pointStyle(p, q, "elbow") : (p.elbowStyle || PIPE_DEFAULTS.elbowStyle);
+            if (st !== "fitting" && st !== "flanged") return;
+            const w = q ? widthAt(b.i) : D;
+            const L = Math.min(pointLength(p, q, "elbow") * w, b.l1 / 2, b.l2 / 2), r = Math.min(radius, L);
+            const e1 = along(b.k, b.u1, -L), e2 = along(b.k, b.u2, L), p1 = along(b.k, b.u1, -r), p2 = along(b.k, b.u2, r);
+            plan.shells.push({ d: seg(e1, p1) + " Q" + b.k.x.toFixed(1) + " " + b.k.y.toFixed(1) + " " + p2.x.toFixed(1) + " " + p2.y.toFixed(1) + " L" + e2.x.toFixed(1) + " " + e2.y.toFixed(1), w: w * 1.26 });
+            band(e1, b.u1, w * 1.26, st === "flanged");
+            band(e2, b.u2, w * 1.26, st === "flanged");
+            plan.kinds.push("elbow");
+            plan.zones.push({ at: b.k, reach: L });
+        });
+    }
+
+    // ---- junctions (auto from the editor, or asked by the point) and plain flanges
+    pts.forEach((q, i) => {
+        const f = q.fit, own = pointFitting(q);
+        const asked = own === "tee" || own === "cross";
+        const auto = f && (f.k === "tee" || f.k === "cross");
+        if (own === "flange" && on) {
+            const u = unitOf(i > 0 ? pts[i - 1] : q, i > 0 ? q : pts[1]);
+            band(q, u, widthAt(i), true);
+            plan.kinds.push("flange");
+            return;
+        }
+        if (!(auto || (asked && on))) return;
+        const st = !on || own === "none" ? "seamless" : pointStyle(p, q, "tee");
+        const W = Math.max(widthAt(i), auto ? Number(f.d) || 0 : 0), L = pointLength(p, q, "tee") * W;
+        const branches = [];
+        if (i > 0) branches.push({ u: unitOf(q, pts[i - 1]), w: widths[i - 1] });
+        if (i < n - 1) branches.push({ u: unitOf(q, pts[i + 1]), w: widths[i] });
+        ((auto && f.dirs) || []).forEach((u) => branches.push({ u: { x: u.x, y: u.y }, w: Number(u.w) || W }));
+        branches.forEach((b) => {
+            const end = along(q, b.u, L);
+            plan.tubes.push({ d: seg(q, end), w: b.w });
+            if (st === "fitting" || st === "flanged") { plan.shells.push({ d: seg(q, end), w: W * 1.28 }); band(end, b.u, W * 1.28, st === "flanged"); }
+        });
+        if (st === "saddle") {
+            const run = branches[0] ? branches[0].u : { x: 1, y: 0 }, ang = Math.atan2(run.y, run.x) * 180 / Math.PI;
+            const ell = (op) => svg`<ellipse cx="${q.x}" cy="${q.y}" rx="${W * 1.25}" ry="${W * 0.78}" transform="rotate(${ang} ${q.x} ${q.y})" fill="${shell}" fill-opacity="${op}" stroke="${wall}" stroke-width="1.5"></ellipse>`;
+            plan.shells.push({ ellipse: ell(1) });
+            plan.veils.push((veil) => ell(veil));
+        }
+        plan.kinds.push(auto ? f.k : own);
+        if (st !== "seamless") plan.zones.push({ at: q, reach: L });
+    });
+    return plan;
+}
+
+/** Where along the line the particles are inside a fitting: [{ at: {x, y}, reach }] (the particles there show at flowInside). */
 function pipeZones(p, pts, D) {
     if (p.look !== "pipe" || p.fittings === false) return [];
-    const z = [];
-    const elb = p.elbowStyle || PIPE_DEFAULTS.elbowStyle;
-    if (elb === "fitting" || elb === "flanged") pipeBends(pts, p.routing).forEach((b) => z.push({ at: b.k, reach: pnum(p, "elbowLength") * D }));
-    pts.forEach((q, i) => {
-        const f = q.fit;
-        if (!f) return;
-        if (f.k === "tee" || f.k === "cross") z.push({ at: q, reach: pnum(p, "teeLength") * Math.max(D, Number(f.d) || D) });
-        if (f.k === "into") z.push({ at: q, reach: Number(f.trim) || 0 });
-        if (f.k === "joint") z.push({ at: q, reach: pnum(p, "reducerLength") * Math.max(D, Number(f.d) || D) });
-    });
-    return z;
+    return pipePlan(p, pts, D).zones;
 }
 
 /** The pipe: every tube, shell, cone, band of this line and of the junctions it draws, layer by layer. */
@@ -331,86 +454,25 @@ function pipeView(p, pts, D, dashes, marchStyle, dashLen) {
     const wall = shade(base, -0.45), light = shade(base, 0.45), shell = shade(base, -0.12);
     const level = p.liquid ? Math.max(0, Math.min(1, p.liquidLevel === undefined || p.liquidLevel === "" ? 1 : Number(p.liquidLevel))) : 0;
     const on = p.fittings !== false;
-    const teeSt = on ? (p.teeStyle || PIPE_DEFAULTS.teeStyle) : "seamless";
-    const redSt = p.reducerStyle || PIPE_DEFAULTS.reducerStyle;
-    const elbSt = on ? (p.elbowStyle || PIPE_DEFAULTS.elbowStyle) : "none";
-    const inside = Math.max(0, Math.min(1, pnum(p, "flowInside"))), veil = on ? 1 - inside : 0;
-    const radius = pipeRadius(p, D);
-    const tubes = [{ d: linePath(pipeDrawPoints(p, pts, D), p.routing, radius), w: D }];
-    const shells = [], cones = [], over = [], veils = [], fits = [];
-
-    // elbows: a shell along the bend, reaching elbowLength along each pipe (never past half a stretch), welds or flanges at its ends
-    if (elbSt === "fitting" || elbSt === "flanged") {
-        pipeBends(pts, p.routing).forEach((b) => {
-            const L = Math.min(pnum(p, "elbowLength") * D, b.l1 / 2, b.l2 / 2), r = Math.min(radius, L);
-            const e1 = along(b.k, b.u1, -L), e2 = along(b.k, b.u2, L), p1 = along(b.k, b.u1, -r), p2 = along(b.k, b.u2, r);
-            shells.push({ d: seg(e1, p1) + " Q" + b.k.x.toFixed(1) + " " + b.k.y.toFixed(1) + " " + p2.x.toFixed(1) + " " + p2.y.toFixed(1) + " L" + e2.x.toFixed(1) + " " + e2.y.toFixed(1), w: D * 1.26 });
-            const fl = elbSt === "flanged";
-            over.push(svg`<polygon data-band points="${bandPts(e1, b.u1, D * 1.26, fl ? 4 : 0, fl ? 5 : 1.6)}" fill="${fl ? shell : wall}" stroke="${fl ? wall : "none"}"></polygon>`);
-            over.push(svg`<polygon data-band points="${bandPts(e2, b.u2, D * 1.26, fl ? 4 : 0, fl ? 5 : 1.6)}" fill="${fl ? shell : wall}" stroke="${fl ? wall : "none"}"></polygon>`);
-            fits.push("elbow");
-        });
-    }
-    pts.forEach((q, i) => {
-        const f = q.fit;
-        if (!f) return;
-        if (f.k === "tee" || f.k === "cross") {
-            // the junction: this run and every branch, each its first stretch, drawn with the rest so the inside joins up
-            const W = Math.max(D, Number(f.d) || D), L = pnum(p, "teeLength") * W;
-            const own = [];
-            if (i > 0) own.push({ u: unitOf(q, pts[i - 1]), w: D });
-            if (i < pts.length - 1) own.push({ u: unitOf(q, pts[i + 1]), w: D });
-            const branches = own.concat((f.dirs || []).map((u) => ({ u: { x: u.x, y: u.y }, w: Number(u.w) || D })));
-            branches.forEach((b) => {
-                const end = along(q, b.u, L);
-                tubes.push({ d: seg(q, end), w: b.w });
-                if (teeSt === "fitting" || teeSt === "flanged") {
-                    shells.push({ d: seg(q, end), w: W * 1.28 });
-                    const fl = teeSt === "flanged";
-                    over.push(svg`<polygon data-band points="${bandPts(end, b.u, W * 1.28, fl ? 4 : 0, fl ? 5 : 1.6)}" fill="${fl ? shell : wall}" stroke="${fl ? wall : "none"}"></polygon>`);
-                }
-            });
-            if (teeSt === "saddle") {
-                const run = own[0] ? own[0].u : { x: 1, y: 0 }, ang = Math.atan2(run.y, run.x) * 180 / Math.PI;
-                const ell = (op) => svg`<ellipse cx="${q.x}" cy="${q.y}" rx="${W * 1.25}" ry="${W * 0.78}" transform="rotate(${ang} ${q.x} ${q.y})" fill="${shell}" fill-opacity="${op}" stroke="${wall}" stroke-width="1.5"></ellipse>`;
-                shells.push({ ellipse: ell(1) });
-                veils.push(ell(veil));
-            }
-            fits.push(f.k);
-        }
-        if (f.k === "joint" && (i === 0 || i === pts.length - 1) && on) {
-            // the reducer: from the wider pipe's width at the joint to this one's, reducerLength x the wider along this pipe
-            const next = pts[i === 0 ? 1 : pts.length - 2], u = unitOf(q, next), W = Math.max(D, Number(f.d) || D);
-            if (redSt === "step") {
-                over.push(svg`<polygon data-band points="${bandPts(q, u, W, 1, 4)}" fill="${shell}" stroke="${wall}"></polygon>`);
-                tubes.push({ d: seg(q, along(q, u, 2)), w: D });
-            } else {
-                const L = Math.min(pnum(p, "reducerLength") * W, Math.hypot(next.x - q.x, next.y - q.y) * 0.9), s = along(q, u, L);
-                const off = redSt === "eccentric" ? (W - D) / 2 : 0;
-                cones.push({ wall: taper(q, s, W, D, off), body: taper(q, s, W * 0.8, D * 0.8, off), liq: taper(q, s, W * 0.6 * level, D * 0.6 * level, off) });
-                if (redSt === "flanged") {
-                    over.push(svg`<polygon data-band points="${bandPts(q, u, W, 4, 5)}" fill="${shell}" stroke="${wall}"></polygon>`);
-                    over.push(svg`<polygon data-band points="${bandPts(s, u, D, 4, 5)}" fill="${shell}" stroke="${wall}"></polygon>`);
-                }
-            }
-            fits.push("reducer");
-        }
-    });
-
+    const veil = on ? 1 - Math.max(0, Math.min(1, pnum(p, "flowInside"))) : 0;
+    const plan = pipePlan(p, pts, D);
+    const tubes = plan.tubes, shells = plan.shells, cones = plan.cones;
     const layer = (list, k, color, extra) => list.filter((t) => t.d).map((t) => svg`<path d="${t.d}" fill="none" stroke="${color}" stroke-width="${t.w * k}" stroke-linejoin="round" stroke-linecap="butt" opacity="${extra === undefined ? 1 : extra}"></path>`);
-    return svg`<g data-pipe data-fittings="${fits.join(" ")}">
-        ${shells.map((s) => s.ellipse || svg`<path d="${s.d}" fill="none" stroke="${wall}" stroke-width="${s.w}" stroke-linejoin="round"></path>`)}
+    const shellLayer = (k, color, op) => shells.filter((s) => s.d).map((s) => svg`<path d="${s.d}" fill="none" stroke="${color}" stroke-width="${s.w * k}" stroke-linejoin="round" stroke-linecap="${s.cap ? "round" : "butt"}" opacity="${op === undefined ? 1 : op}"></path>`);
+    return svg`<g data-pipe data-fittings="${plan.kinds.join(" ")}">
+        ${shells.map((s) => s.ellipse || nothing)}
+        ${shellLayer(1, wall)}
         ${layer(tubes, 1, wall)}
         ${cones.map((c) => svg`<polygon points="${c.wall}" fill="${wall}"></polygon>`)}
-        ${shells.filter((s) => s.d).map((s) => svg`<path d="${s.d}" fill="none" stroke="${shell}" stroke-width="${s.w * 0.84}" stroke-linejoin="round"></path>`)}
+        ${shellLayer(0.84, shell)}
         ${layer(tubes, 0.8, base)}
         ${cones.map((c) => svg`<polygon points="${c.body}" fill="${shell}"></polygon>`)}
         ${level > 0 ? svg`<g data-liquid opacity="0.92">${layer(tubes, 0.6 * level, p.liquidColor || "#2f8fff")}${cones.map((c) => svg`<polygon points="${c.liq}" fill="${p.liquidColor || "#2f8fff"}"></polygon>`)}</g>` : nothing}
         ${layer(tubes, 0.18, light, 0.8)}
         ${layer(tubes, 0.06, "#ffffff", 0.5)}
-        ${veil > 0 ? svg`<g data-veil>${shells.filter((s) => s.d).map((s) => svg`<path d="${s.d}" fill="none" stroke="${shell}" stroke-width="${s.w * 0.84}" stroke-linejoin="round" opacity="${veil}"></path>`)}${cones.map((c) => svg`<polygon points="${c.body}" fill="${shell}" opacity="${veil}"></polygon>`)}${veils}</g>` : nothing}
-        ${over}
-        ${dashes ? svg`<path class="dashes" style="${marchStyle}" d="${linePath(pts, p.routing, radius)}" fill="none" stroke="${shade(base, 0.7)}" stroke-width="${Math.max(2, D * 0.22)}" stroke-dasharray="${dashLen},${dashLen}" stroke-linecap="round"></path>` : nothing}
+        ${veil > 0 ? svg`<g data-veil>${shellLayer(0.84, shell, veil)}${cones.map((c) => svg`<polygon points="${c.body}" fill="${shell}" opacity="${veil}"></polygon>`)}${plan.veils.map((v) => v(veil))}</g>` : nothing}
+        ${plan.over}
+        ${dashes ? svg`<path class="dashes" style="${marchStyle}" d="${linePath(pts, p.routing, pipeRadius(p, D))}" fill="none" stroke="${shade(base, 0.7)}" stroke-width="${Math.max(2, D * 0.22)}" stroke-dasharray="${dashLen},${dashLen}" stroke-linecap="round"></path>` : nothing}
     </g>`;
 }
 
@@ -422,7 +484,35 @@ export const flowLine = defineComponent({
     capabilities: { resizable: false, rotatable: false, flippable: false, lockable: true },
     editor: { points: "points" },
     properties: {
-        points: { type: "list", default: DEFAULT_POINTS, hidden: true, bindable: false },
+        // every point, one row each (the canvas moves them; here each says what fitting it has, how wide the pipe is from it on, where it is)
+        points: { type: "list", default: DEFAULT_POINTS, group: "Points", label: "Point list", noun: "point", min: 2, bindable: false, noReset: true,
+            itemLabel: (q, i) => "P" + (i + 1) + (q && q.link ? " · connected" : "") + (q && q.fitting && q.fitting !== "auto" ? " · " + q.fitting : "") + (q && Number(q.d) > 0 ? " · Ø" + q.d : ""),
+            item: {
+                // a new point: after the last one, a little further on (the box follows it)
+                create: (items) => {
+                    const last = items[items.length - 1] || { x: 12, y: 12 };
+                    let n = items.length + 1;
+                    while (items.some((q) => q.id === "p" + n)) n++;
+                    return { id: "p" + n, x: (Number(last.x) || 0) + 60, y: Number(last.y) || 0 };
+                },
+                fields: {
+                    fitting: { type: "enum", default: "auto", label: "Fitting here", options: POINT_FITTINGS, bindable: false, visibleWhen: (q, p) => p.look === "pipe",
+                        help: "Auto: what the joins and bends make it (a tee where pipes branch, an elbow on a bend). Or this point's own." },
+                    elbowStyle: { type: "enum", default: "line", label: "Elbow style", bindable: false, visibleWhen: (q, p) => p.look === "pipe" && q.fitting === "elbow",
+                        options: [{ value: "line", label: "Like the line" }, { value: "sharp", label: "Sharp (mitre)" }, { value: "long", label: "Long radius bend" }, { value: "fitting", label: "Elbow fitting (welded)" }, { value: "flanged", label: "Flanged elbow" }] },
+                    teeStyle: { type: "enum", default: "line", label: "Tee style", bindable: false, visibleWhen: (q, p) => p.look === "pipe" && (q.fitting === "tee" || q.fitting === "cross"),
+                        options: [{ value: "line", label: "Like the line" }, { value: "seamless", label: "Seamless (no body)" }, { value: "fitting", label: "Tee fitting (welded)" }, { value: "flanged", label: "Flanged tee" }, { value: "saddle", label: "Saddle (branch outlet)" }] },
+                    reducerStyle: { type: "enum", default: "line", label: "Reducer style", bindable: false, visibleWhen: (q, p) => p.look === "pipe" && (q.fitting === "reducer" || Number(q.d) > 0),
+                        options: [{ value: "line", label: "Like the line" }, { value: "concentric", label: "Concentric" }, { value: "eccentric", label: "Eccentric (one side flat)" }, { value: "step", label: "Bushing (step)" }, { value: "flanged", label: "Flanged" }] },
+                    length: { type: "number", default: 0, min: 0, max: 6, step: 0.1, unit: "× Ø", label: "Fitting length", bindable: false,
+                        visibleWhen: (q, p) => p.look === "pipe" && (["elbow", "tee", "cross", "reducer"].indexOf(q.fitting) !== -1 || Number(q.d) > 0),
+                        help: "0: the line's length for this fitting." },
+                    d: { type: "number", default: 0, min: 0, max: 200, unit: "px", label: "Diameter from here", bindable: false, visibleWhen: (q, p) => p.look === "pipe",
+                        help: "The pipe is this wide from this point on (0: as before it). A reducer is drawn where it changes." },
+                    x: { type: "number", default: 0, unit: "px", label: "X (in its box)", bindable: false },
+                    y: { type: "number", default: 0, unit: "px", label: "Y (in its box)", bindable: false }
+                }
+            } },
         connect: { type: "boolean", default: true, group: "Shape", label: "Connect points to components",
             help: "While a point is dragged near a component, its 8 connection points show and the point snaps to them. Off: it only joins other lines' points." },
         routing: { type: "enum", default: "straight", group: "Shape", label: "Corners", style: "segmented",
