@@ -354,10 +354,13 @@ function valveView(p, pts, i, D) {
     const s = q.valveFlip ? 1 : -1;
     const style = q.valveStyle || p.valveStyle || "gate";
     const line = { stroke: wall, "stroke-width": 1.5 };
+    // the solid neck between the flanges: no liquid shows beside a bow-tie's waist
     const flanges = (gap) => svg`<rect data-valve-flange x="${-gap - 3}" y="${-13.6}" width="6" height="27.2" rx="1" fill="${shell}" stroke="${wall}"></rect>
         <rect data-valve-flange x="${gap - 3}" y="${-13.6}" width="6" height="27.2" rx="1" fill="${shell}" stroke="${wall}"></rect>`;
     let body = nothing;
-    if (style === "gate") body = svg`${flanges(24)}
+    if (style === "gate") body = svg`
+        <rect data-valve-neck x="-24" y="-8" width="48" height="16" fill="${shell}" stroke="${wall}" stroke-width="1.5"></rect>
+        ${flanges(24)}
         <polygon points="-22,-15 -22,15 0,4 22,15 22,-15 0,-4" fill="${base}" stroke="${line.stroke}" stroke-width="1.5" stroke-linejoin="round"></polygon>
         <rect x="-6" y="-6" width="12" height="12" rx="2" fill="${shell}" stroke="${wall}"></rect>
         <rect x="-5" y="${s < 0 ? -30 : 6}" width="10" height="24" fill="${shell}" stroke="${wall}"></rect>
@@ -383,7 +386,9 @@ function valveView(p, pts, i, D) {
         <line data-valve-disc x1="0" y1="-11" x2="0" y2="11" stroke="${state}" stroke-width="3.5" stroke-linecap="round" transform="rotate(${open ? 80 : 0})"></line>
         <rect x="-4" y="${s < 0 ? -30 : 16}" width="8" height="14" fill="${shell}" stroke="${wall}"></rect>
         <rect data-valve-state x="-11" y="${s < 0 ? -40 : 30}" width="22" height="10" rx="2" fill="${state}" stroke="${wall}"></rect>`;
-    else body = svg`${flanges(24)}
+    else body = svg`
+        <rect data-valve-neck x="-24" y="-8" width="48" height="16" fill="${shell}" stroke="${wall}" stroke-width="1.5"></rect>
+        ${flanges(24)}
         <polygon points="-22,-14 -22,14 0,3 22,14 22,-14 0,-3" fill="${base}" stroke="${wall}" stroke-width="1.5" stroke-linejoin="round"></polygon>
         <line x1="0" y1="0" x2="0" y2="${s * 30}" stroke="${wall}" stroke-width="2.5"></line>
         <path data-valve-state d="M-22 ${s * 30} A22 16 0 0 ${s < 0 ? 1 : 0} 22 ${s * 30} Z" fill="${state}" stroke="${wall}" stroke-width="1.5"></path>`;
@@ -809,13 +814,13 @@ export const flowLine = defineComponent({
                     const spin = Number(p.particleRotation) || 0;
                     // inside a pipe's fittings the particles fade to flowInside (an opacity keyframe: the compositor runs it too)
                     const D = Math.max(2, Number(p.diameter) || 16);
-                    // a valve is a zone too: the particles fade while they pass through its body (drawn under them)
+                    // a valve is a zone too: the particles disappear while they pass through its solid body (drawn under them)
                     const valveSize = (p.look === "pipe" ? D : Math.max(8, (p.strokeWidth !== undefined && p.strokeWidth !== "" ? Number(p.strokeWidth) : 3) * 3)) * 3;
-                    const valveZones = pts.filter((q) => q && q.fitting === "valve").map((q) => ({ at: { x: q.x, y: q.y }, reach: valveSize / 2 }));
+                    const valveZones = pts.filter((q) => q && q.fitting === "valve").map((q) => ({ at: { x: q.x, y: q.y }, reach: valveSize / 2, hidden: true }));
                     const zones = pipeZones(p, pts, D).concat(valveZones).map((z) => {
                         let best = 0, bd = Infinity;
                         samples.forEach((q, j) => { const dd = Math.hypot(q.x - z.at.x, q.y - z.at.y); if (dd < bd) { bd = dd; best = j; } });
-                        return { at: (len * best) / Math.max(1, samples.length - 1), reach: z.reach };
+                        return { at: (len * best) / Math.max(1, samples.length - 1), reach: z.reach, hidden: !!z.hidden };
                     });
                     const faded = Math.max(0, Math.min(1, pnum(p, "flowInside")));
                     // stretches at their own speeds: which stretch each sample is in (the sample nearest each point starts its stretch)
@@ -832,7 +837,9 @@ export const flowLine = defineComponent({
                     }
                     const frames = samples.map((q, j) => {
                         const f = { transform: "translate(" + (q.x - half) + "px," + (q.y - half) + "px) rotate(" + ((turn ? q.a : 0) + spin) + "deg)" };
-                        if (zones.length) { const at = (len * j) / Math.max(1, samples.length - 1); f.opacity = zones.some((z) => Math.abs(at - z.at) <= z.reach) ? faded : 1; }
+                        if (zones.length) { const at = (len * j) / Math.max(1, samples.length - 1); const inside = zones.filter((z) => Math.abs(at - z.at) <= z.reach);
+                            // inside a valve's closed body nothing shows; inside a fitting the flow fades to flowInside
+                            f.opacity = inside.some((z) => z.hidden) ? 0 : inside.length ? faded : 1; }
                         return f;
                     });
                     // timed at the speed of now (80 while it stands still); later speeds are a playback rate against this one

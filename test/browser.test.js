@@ -398,7 +398,7 @@ withHarness({
                 await NexaTest.settle();
                 var g = NexaTest.wc(n).renderRoot.querySelector("[data-valve]");
                 var st8 = g.querySelector("[data-valve-state]").getBoundingClientRect(), pipe = g.getBoundingClientRect();
-                out[st + flip] = [g.getAttribute("data-style"), g.querySelectorAll("[data-valve-flange]").length, st8.top + st8.height / 2 < NexaTest.wc(n).getBoundingClientRect().top + 60 ? "up" : "down"];
+                out.neck = (out.neck || 0) + g.querySelectorAll("[data-valve-neck]").length; out[st + flip] = [g.getAttribute("data-style"), g.querySelectorAll("[data-valve-flange]").length, st8.top + st8.height / 2 < NexaTest.wc(n).getBoundingClientRect().top + 60 ? "up" : "down"];
             }
             return out;
         })()`);
@@ -406,6 +406,7 @@ withHarness({
             assert.deepStrictEqual(r[st + 'false'], [st, 2, 'up'], st);
             assert.deepStrictEqual(r[st + 'true'], [st, 2, 'down'], st + ' flipped');
         }
+        assert.strictEqual(r.neck, 4, 'gate and control (bow-tie bodies) close the pipe between the flanges, flipped or not');
     });
 
     await ok('flow line pipe: the white centre line is drawn in the editor, not on the page unless asked', async () => {
